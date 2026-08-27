@@ -31,7 +31,6 @@ jobs:
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
           hostname: ai-worker-${{ matrix.idx }}
-          args: --ephemeral
       - name: Fetch llama.cpp (CPU build)
         run: |
           curl -sL "$LLAMACPP_URL" -o llama.zip && unzip -q llama.zip -d llama
@@ -51,7 +50,6 @@ jobs:
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
           hostname: ai-head
-          args: --ephemeral
       - name: Fetch llama.cpp
         run: |
           curl -sL "$LLAMACPP_URL" -o llama.zip && unzip -q llama.zip -d llama
