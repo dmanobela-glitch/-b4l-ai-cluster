@@ -15,7 +15,7 @@ on:
       window_min:  { description: "cluster alive window (min)", default: "40", required: true }
 
 env:
-  LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10655/llama-b10655-bin-ubuntu-x64.zip"
+  LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10655/llama-b10655-bin-ubuntu-x64.tar.gz"
   RPC_PORT: "50052"
 
 jobs:
@@ -33,7 +33,8 @@ jobs:
           hostname: ai-worker-${{ matrix.idx }}
       - name: Fetch llama.cpp (CPU build)
         run: |
-          curl -sL "$LLAMACPP_URL" -o llama.zip && unzip -q llama.zip -d llama
+          curl -fsSL "$LLAMACPP_URL" -o llama.tgz
+          mkdir -p llama && tar -xzf llama.tgz -C llama
           find llama -type f -name 'ggml-rpc-server' -exec chmod +x {} \;
       - name: Run rpc-server on the tailnet IP for the whole window
         run: |
@@ -52,7 +53,8 @@ jobs:
           hostname: ai-head
       - name: Fetch llama.cpp
         run: |
-          curl -sL "$LLAMACPP_URL" -o llama.zip && unzip -q llama.zip -d llama
+          curl -fsSL "$LLAMACPP_URL" -o llama.tgz
+          mkdir -p llama && tar -xzf llama.tgz -C llama
           find llama -type f -name 'llama-*' -exec chmod +x {} \;
       - name: Download the 70B to the big disk (/mnt ~70 GB)
         run: |
