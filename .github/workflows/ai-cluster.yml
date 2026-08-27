@@ -1,0 +1,112 @@
+# B4L AI Cluster — pooled-RAM 70B inference across co-located Azure runners.
+# Put this at .github/workflows/ai-cluster.yml in the public AI repo.
+# Repo secrets needed:  TS_AUTHKEY (Tailscale ephemeral key)   HF_TOKEN (read-only, for fast model dl)
+#
+# 6 worker jobs each run ggml-rpc-server holding one shard of the 70B (~6.6 GB each);
+# 1 head job downloads the GGUF, offloads all 80 layers across the workers over the tailnet,
+# then runs the v2 test task and prints the (coherent = working) output + tok/s.
+name: b4l-ai-cluster
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:   { description: "GGUF url", default: "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
+      model_file:  { description: "GGUF filename", default: "Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
+      n_workers:   { description: "worker nodes (must match the matrix below)", default: "6", required: true }
+      window_min:  { description: "cluster alive window (min)", default: "40", required: true }
+
+env:
+  LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10655/llama-b10655-bin-ubuntu-x64.zip"
+  RPC_PORT: "50052"
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        idx: [1, 2, 3, 4, 5, 6]        # keep in sync with n_workers
+    steps:
+      - name: Join tailnet
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: ai-worker-${{ matrix.idx }}
+          args: --ephemeral
+      - name: Fetch llama.cpp (CPU build)
+        run: |
+          curl -sL "$LLAMACPP_URL" -o llama.zip && unzip -q llama.zip -d llama
+          find llama -type f -name 'ggml-rpc-server' -exec chmod +x {} \;
+      - name: Run rpc-server on the tailnet IP for the whole window
+        run: |
+          BIN=$(find llama -name ggml-rpc-server -type f | head -1)
+          TSIP=$(tailscale ip -4 | head -1)
+          echo "worker ${{ matrix.idx }}: rpc-server @ $TSIP:$RPC_PORT (holds a 70B shard)"
+          timeout ${{ inputs.window_min }}m "$BIN" -H "$TSIP" -p "$RPC_PORT" -t 4 || true
+
+  head:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Join tailnet
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: ai-head
+          args: --ephemeral
+      - name: Fetch llama.cpp
+        run: |
+          curl -sL "$LLAMACPP_URL" -o llama.zip && unzip -q llama.zip -d llama
+          find llama -type f -name 'llama-*' -exec chmod +x {} \;
+      - name: Download the 70B to the big disk (/mnt ~70 GB)
+        run: |
+          sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
+          curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
+               -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+               -o "/mnt/m/${{ inputs.model_file }}" "${{ inputs.model_url }}"
+          ls -lh "/mnt/m/${{ inputs.model_file }}"
+      - name: Wait for all workers, build the --rpc peer list
+        id: peers
+        run: |
+          N=${{ inputs.n_workers }}; PEERS=""
+          for i in $(seq 1 "$N"); do
+            ok=""
+            for t in $(seq 1 90); do
+              IP=$(tailscale ip -4 "ai-worker-$i" 2>/dev/null | head -1)
+              if [ -n "$IP" ] && nc -z -w2 "$IP" "$RPC_PORT" 2>/dev/null; then
+                PEERS="${PEERS:+$PEERS,}$IP:$RPC_PORT"; ok=1; echo "worker $i up @ $IP"; break
+              fi
+              sleep 5
+            done
+            [ -z "$ok" ] && { echo "::error::worker $i never came up"; exit 1; }
+          done
+          echo "rpc=$PEERS" >> "$GITHUB_OUTPUT"
+          echo "peers: $PEERS"
+      - name: Pool the 70B across the workers + run the v2 test
+        run: |
+          SRV=$(find llama -name 'llama-server' -type f | head -1)
+          # --n-gpu-layers 99 pushes ALL layers onto the RPC devices (they are offload targets);
+          # no --tensor-split => auto-balance by each worker's reported free memory.
+          "$SRV" --model "/mnt/m/${{ inputs.model_file }}" \
+                 --rpc "${{ steps.peers.outputs.rpc }}" --n-gpu-layers 99 \
+                 --ctx-size 4096 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
+          echo "loading 70B across the cluster (can take several min)..."
+          for i in $(seq 1 180); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "READY"; break; }; sleep 5; done
+          python3 - <<'PY'
+          import json,urllib.request,time
+          def ask(p, mx=1500):
+              b=json.dumps({"messages":[{"role":"user","content":p}],"temperature":0.2,"max_tokens":mx}).encode()
+              r=urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8899/v1/chat/completions",b,{"Content-Type":"application/json"}),timeout=3600)
+              return json.loads(r.read())
+          t=time.time()
+          d=ask("You are a senior quant dev. Write a Python function that, given a list of WaveTrend "
+                "values, returns +1 at a confirmed local bottom (fell then rose for 2 bars), -1 at a "
+                "confirmed top, else 0. No lookahead. Give the final code only.")
+          m=d["choices"][0]["message"]; u=d.get("usage",{})
+          out=m.get("content") or m.get("reasoning_content") or ""
+          dt=time.time()-t; tk=u.get("completion_tokens",0)
+          print("=== 70B POOLED-CLUSTER OUTPUT (coherent = it works, not junk) ===")
+          print(out[:1800])
+          print(f"\n=== {tk} tokens in {dt:.0f}s = {tk/max(dt,1):.2f} tok/s across the 6-node cluster ===")
+          PY
+      - name: Head log tail
+        if: always()
+        run: tail -40 head.log 2>/dev/null || true
