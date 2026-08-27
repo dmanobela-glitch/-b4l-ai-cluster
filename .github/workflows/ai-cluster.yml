@@ -11,7 +11,7 @@ on:
     inputs:
       model_url:   { description: "GGUF url", default: "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
       model_file:  { description: "GGUF filename", default: "Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
-      n_workers:   { description: "worker nodes (must match the matrix below)", default: "6", required: true }
+      n_workers:   { description: "worker nodes (must match the matrix below)", default: "10", required: true }
       window_min:  { description: "cluster alive window (min) — must exceed head 70B download+load", default: "120", required: true }
 
 env:
@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        idx: [1, 2, 3, 4, 5, 6]        # keep in sync with n_workers
+        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]        # keep in sync with n_workers
     steps:
       - name: Join tailnet
         uses: tailscale/github-action@v2
@@ -94,7 +94,7 @@ jobs:
           # no --tensor-split => auto-balance by each worker's reported free memory.
           "$SRV" --model "/mnt/m/${{ inputs.model_file }}" \
                  --rpc "${{ steps.peers.outputs.rpc }}" --n-gpu-layers 99 \
-                 --ctx-size 4096 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
+                 --ctx-size 2048 --batch-size 128 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
           echo "loading 70B across the cluster (can take several min)..."
           for i in $(seq 1 180); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "READY"; break; }; sleep 5; done
           python3 - <<'PY'
