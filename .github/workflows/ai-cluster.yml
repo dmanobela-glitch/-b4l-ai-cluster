@@ -12,7 +12,7 @@ on:
       model_url:   { description: "GGUF url", default: "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
       model_file:  { description: "GGUF filename", default: "Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
       n_workers:   { description: "worker nodes (must match the matrix below)", default: "6", required: true }
-      window_min:  { description: "cluster alive window (min)", default: "40", required: true }
+      window_min:  { description: "cluster alive window (min) — must exceed head 70B download+load", default: "120", required: true }
 
 env:
   LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10655/llama-b10655-bin-ubuntu-x64.tar.gz"
