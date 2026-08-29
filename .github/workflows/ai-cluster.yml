@@ -132,8 +132,12 @@ jobs:
                  --rpc "${{ steps.peers.outputs.rpc }}" --n-gpu-layers 99 \
                  --ctx-size 2048 --batch-size 128 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
           echo "loading 70B across the cluster (can take several min)..."
-          for i in $(seq 1 180); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "READY"; break; }; sleep 5; done
-          python3 - <<'PY'
+          # 70B across 11 CPU-RPC workers is slow — wait up to ~25 min for health before giving up.
+          for i in $(seq 1 300); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "READY"; break; }; sleep 5; done
+          curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || echo "::warning::70B not healthy yet — smoke test may fail, but the serving step runs anyway (if:always)"
+          # SMOKE TEST is BEST-EFFORT ONLY — it must NEVER fail this step, because a failed step would SKIP the
+          # real serving step below and leave heavy builds unserved (the bug that stranded P2-*-v2).
+          python3 - <<'PY' || echo "smoke test non-fatal (server still loading / transient) — serving continues"
           import json,urllib.request,time
           def ask(p, mx=1500):
               b=json.dumps({"messages":[{"role":"user","content":p}],"temperature":0.2,"max_tokens":mx}).encode()
@@ -151,11 +155,18 @@ jobs:
           print(f"\n=== {tk} tokens in {dt:.0f}s = {tk/max(dt,1):.2f} tok/s across the 6-node cluster ===")
           PY
       - name: Poll the jobs queue + build heavy tasks on the pooled 70B (PULL model, for the window)
+        # if: always() — the smoke-test step above is best-effort; serving must run whenever llama-server is
+        # actually up, even if the smoke test flaked. Without this, one flaky test inference strands every
+        # queued heavy build (P2-*-v2) unserved. A genuinely-dead server is handled by the health-or-break below.
+        if: always()
         env:
           JOBS_TOKEN: ${{ secrets.JOBS_TOKEN }}
         run: |
           MIN=${{ inputs.window_min || '330' }}
           END=$(( $(date +%s) + (MIN - 20)*60 ))
+          # If the 70B is still finishing its load, give it a short grace window before serving rather than
+          # bailing immediately (this step can start the instant the smoke-test step returns).
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && break; sleep 5; done
           echo "b70 pulling heavy builds from /jobs/claim until the window ends..."
           while [ "$(date +%s)" -lt "$END" ]; do
             curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "llama-server died - ending"; break; }
