@@ -128,30 +128,21 @@ jobs:
           END=$(( $(date +%s) + (MIN - 20)*60 ))
           echo "b70 pulling heavy builds from /jobs/claim until the window ends..."
           while [ "$(date +%s)" -lt "$END" ]; do
-            curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "llama-server died — ending"; break; }
-            RESP=$(curl -s -m 30 -w $'\n%{http_code}' -H "Authorization: Bearer $JOBS_TOKEN" \
-                   "https://compute.bull4life.com/jobs/claim?agent=b70&band=heavy" || echo $'\n000')
-            CODE=$(printf '%s' "$RESP" | tail -1); BODY=$(printf '%s' "$RESP" | sed '$d')
-            if [ "$CODE" = "200" ] && [ -n "$BODY" ]; then
-              printf '%s' "$BODY" | python3 - <<'PYEOF'
-import json,sys,os,urllib.request
-job=json.load(sys.stdin); jid=job["id"]
-b=json.dumps({"messages":[{"role":"user","content":job["prompt"]}],"temperature":0.2,"max_tokens":1500}).encode()
-try:
-    r=urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8899/v1/chat/completions",b,{"Content-Type":"application/json"}),timeout=3000)
-    out=json.loads(r.read())["choices"][0]["message"].get("content",""); ok=True
-except Exception as e:
-    out="b70 build error: %s"%e; ok=False
-res=json.dumps({"id":jid,"agent":"b70","result":out,"ok":ok}).encode()
-urllib.request.urlopen(urllib.request.Request("https://compute.bull4life.com/jobs/result",res,
-    {"Authorization":"Bearer %s"%os.environ["JOBS_TOKEN"],"Content-Type":"application/json"}),timeout=60)
-print("b70 built + posted job", jid, "ok=%s"%ok)
-PYEOF
+            curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "llama-server died - ending"; break; }
+            JOB=$(curl -s -m 30 -H "Authorization: Bearer $JOBS_TOKEN" "https://compute.bull4life.com/jobs/claim?agent=b70&band=heavy")
+            ID=$(printf '%s' "$JOB" | jq -r '.id // empty' 2>/dev/null)
+            if [ -n "$ID" ]; then
+              PROMPT=$(printf '%s' "$JOB" | jq -r '.prompt')
+              REQ=$(jq -n --arg p "$PROMPT" '{messages:[{role:"user",content:$p}],temperature:0.2,max_tokens:1500}')
+              OUT=$(curl -s -m 3000 http://127.0.0.1:8899/v1/chat/completions -H "Content-Type: application/json" -d "$REQ" | jq -r '.choices[0].message.content // "b70 empty"')
+              RES=$(jq -n --arg id "$ID" --arg r "$OUT" '{id:$id,agent:"b70",result:$r,ok:true}')
+              curl -s -m 60 https://compute.bull4life.com/jobs/result -H "Authorization: Bearer $JOBS_TOKEN" -H "Content-Type: application/json" -d "$RES" >/dev/null
+              echo "b70 built + posted $ID"
             else
-              sleep 20   # 204/empty or transient: no heavy work right now — keep the 70B ready + re-poll
+              sleep 20
             fi
           done
-          echo "window elapsed — b70 winding down (6h cron respins a fresh cluster)"
+          echo "window elapsed - b70 winding down (6h cron respins a fresh cluster)"
       - name: Head log tail
         if: always()
         run: tail -40 head.log 2>/dev/null || true
