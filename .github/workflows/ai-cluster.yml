@@ -120,17 +120,38 @@ jobs:
           print(out[:1800])
           print(f"\n=== {tk} tokens in {dt:.0f}s = {tk/max(dt,1):.2f} tok/s across the 6-node cluster ===")
           PY
-      - name: Serve the pooled 70B for the rest of the window (router sends heavy builds to ai-head:8899)
+      - name: Poll the jobs queue + build heavy tasks on the pooled 70B (PULL model, for the window)
+        env:
+          JOBS_TOKEN: ${{ secrets.JOBS_TOKEN }}
         run: |
           MIN=${{ inputs.window_min || '330' }}
-          SERVE=$(( (MIN - 20) * 60 )); [ "$SERVE" -lt 60 ] && SERVE=60
-          echo "70B is SERVING on the tailnet (ai-head:8899) for ~$((SERVE/60)) min — b70 is UP for the router now"
-          # keep the job (and the background llama-server started above) alive so it serves; bail if it dies
-          for i in $(seq 1 $((SERVE/10))); do
-            curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "llama-server died — ending serve early"; break; }
-            sleep 10
+          END=$(( $(date +%s) + (MIN - 20)*60 ))
+          echo "b70 pulling heavy builds from /jobs/claim until the window ends..."
+          while [ "$(date +%s)" -lt "$END" ]; do
+            curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "llama-server died — ending"; break; }
+            RESP=$(curl -s -m 30 -w $'\n%{http_code}' -H "Authorization: Bearer $JOBS_TOKEN" \
+                   "https://compute.bull4life.com/jobs/claim?agent=b70&band=heavy" || echo $'\n000')
+            CODE=$(printf '%s' "$RESP" | tail -1); BODY=$(printf '%s' "$RESP" | sed '$d')
+            if [ "$CODE" = "200" ] && [ -n "$BODY" ]; then
+              printf '%s' "$BODY" | python3 - <<'PYEOF'
+import json,sys,os,urllib.request
+job=json.load(sys.stdin); jid=job["id"]
+b=json.dumps({"messages":[{"role":"user","content":job["prompt"]}],"temperature":0.2,"max_tokens":1500}).encode()
+try:
+    r=urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8899/v1/chat/completions",b,{"Content-Type":"application/json"}),timeout=3000)
+    out=json.loads(r.read())["choices"][0]["message"].get("content",""); ok=True
+except Exception as e:
+    out="b70 build error: %s"%e; ok=False
+res=json.dumps({"id":jid,"agent":"b70","result":out,"ok":ok}).encode()
+urllib.request.urlopen(urllib.request.Request("https://compute.bull4life.com/jobs/result",res,
+    {"Authorization":"Bearer %s"%os.environ["JOBS_TOKEN"],"Content-Type":"application/json"}),timeout=60)
+print("b70 built + posted job", jid, "ok=%s"%ok)
+PYEOF
+            else
+              sleep 20   # 204/empty or transient: no heavy work right now — keep the 70B ready + re-poll
+            fi
           done
-          echo "serve window elapsed — b70 winding down (the 6h cron respins a fresh cluster)"
+          echo "window elapsed — b70 winding down (6h cron respins a fresh cluster)"
       - name: Head log tail
         if: always()
         run: tail -40 head.log 2>/dev/null || true
