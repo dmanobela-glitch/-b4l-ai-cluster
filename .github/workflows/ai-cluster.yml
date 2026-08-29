@@ -12,7 +12,11 @@ on:
       model_url:   { description: "GGUF url", default: "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
       model_file:  { description: "GGUF filename", default: "Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
       n_workers:   { description: "worker nodes (must match the matrix below)", default: "11", required: true }
-      window_min:  { description: "cluster alive window (min) — must exceed head 70B download+load", default: "120", required: true }
+      window_min:  { description: "cluster alive window (min) — must exceed head 70B download+load", default: "330", required: false }
+  schedule:
+    # THE SYSTEM self-spins b70 every 6h (00/06/12/18 UTC + jitter) for a ~5.5h window = near-continuous
+    # 70B availability, no agent hand-triggering. On an early failure the next cron respins within 6h.
+    - cron: '7 */6 * * *'
 
 env:
   LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10655/llama-b10655-bin-ubuntu-x64.tar.gz"
@@ -41,7 +45,7 @@ jobs:
           BIN=$(find llama -name ggml-rpc-server -type f | head -1)
           TSIP=$(tailscale ip -4 | head -1)
           echo "worker ${{ matrix.idx }}: rpc-server @ $TSIP:$RPC_PORT (holds a 70B shard)"
-          timeout ${{ inputs.window_min }}m "$BIN" -H "$TSIP" -p "$RPC_PORT" -t 4 || true
+          timeout ${{ inputs.window_min || '330' }}m "$BIN" -H "$TSIP" -p "$RPC_PORT" -t 4 || true
 
   head:
     runs-on: ubuntu-latest
@@ -61,12 +65,12 @@ jobs:
           sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
           curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
                -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-               -o "/mnt/m/${{ inputs.model_file }}" "${{ inputs.model_url }}"
-          ls -lh "/mnt/m/${{ inputs.model_file }}"
+               -o "/mnt/m/${{ inputs.model_file || 'Llama-3.3-70B-Instruct-Q4_K_M.gguf' }}" "${{ inputs.model_url || 'https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf' }}"
+          ls -lh "/mnt/m/${{ inputs.model_file || 'Llama-3.3-70B-Instruct-Q4_K_M.gguf' }}"
       - name: Wait for all workers, build the --rpc peer list
         id: peers
         run: |
-          N=${{ inputs.n_workers }}
+          N=${{ inputs.n_workers || '11' }}
           # Discover worker IPs from `tailscale status --json` (reliable — name resolution via
           # `tailscale ip <host>` was flaky). Match peers whose hostname starts with ai-worker-,
           # that are Online, then confirm the rpc port is open before adding to the pool.
@@ -92,7 +96,7 @@ jobs:
           SRV=$(find llama -name 'llama-server' -type f | head -1)
           # --n-gpu-layers 99 pushes ALL layers onto the RPC devices (they are offload targets);
           # no --tensor-split => auto-balance by each worker's reported free memory.
-          "$SRV" --model "/mnt/m/${{ inputs.model_file }}" \
+          "$SRV" --model "/mnt/m/${{ inputs.model_file || 'Llama-3.3-70B-Instruct-Q4_K_M.gguf' }}" \
                  --rpc "${{ steps.peers.outputs.rpc }}" --n-gpu-layers 99 \
                  --ctx-size 2048 --batch-size 128 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
           echo "loading 70B across the cluster (can take several min)..."
@@ -114,6 +118,17 @@ jobs:
           print(out[:1800])
           print(f"\n=== {tk} tokens in {dt:.0f}s = {tk/max(dt,1):.2f} tok/s across the 6-node cluster ===")
           PY
+      - name: Serve the pooled 70B for the rest of the window (router sends heavy builds to ai-head:8899)
+        run: |
+          MIN=${{ inputs.window_min || '330' }}
+          SERVE=$(( (MIN - 20) * 60 )); [ "$SERVE" -lt 60 ] && SERVE=60
+          echo "70B is SERVING on the tailnet (ai-head:8899) for ~$((SERVE/60)) min — b70 is UP for the router now"
+          # keep the job (and the background llama-server started above) alive so it serves; bail if it dies
+          for i in $(seq 1 $((SERVE/10))); do
+            curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "llama-server died — ending serve early"; break; }
+            sleep 10
+          done
+          echo "serve window elapsed — b70 winding down (the 6h cron respins a fresh cluster)"
       - name: Head log tail
         if: always()
         run: tail -40 head.log 2>/dev/null || true
