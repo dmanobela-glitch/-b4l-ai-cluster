@@ -13,10 +13,13 @@ on:
       model_file:  { description: "GGUF filename", default: "Llama-3.3-70B-Instruct-Q4_K_M.gguf", required: true }
       n_workers:   { description: "worker nodes (must match the matrix below)", default: "11", required: true }
       window_min:  { description: "cluster alive window (min) — must exceed head 70B download+load", default: "330", required: false }
+  # ON-DEMAND ONLY (laptop_helper 2026-08-29): NO 24/7 self-spin — 12 near-continuous jobs would starve
+  # b4l-mint's build/mint concurrency on this same account + churn Actions vs the throttle. The ROUTER spins
+  # b70 (gh workflow run) ONLY when a diff>=8 build is queued AND no run is in_progress, then it dies after
+  # its serve window. WIDE 24h safety backstop only, so b70 is never stuck permanently un-spun if the router
+  # is down. b70 = up ONLY when there's real heavy work.
   schedule:
-    # THE SYSTEM self-spins b70 every 6h (00/06/12/18 UTC + jitter) for a ~5.5h window = near-continuous
-    # 70B availability, no agent hand-triggering. On an early failure the next cron respins within 6h.
-    - cron: '7 */6 * * *'
+    - cron: '17 5 * * *'
 
 env:
   LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10655/llama-b10655-bin-ubuntu-x64.tar.gz"
