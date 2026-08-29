@@ -53,10 +53,13 @@ jobs:
           curl -fsSL --retry 5 --retry-all-errors -o b4l_node \
             "https://github.com/dmanobela-glitch/b4l-mint/releases/download/v1.15.0/b4l_node-linux" \
             && chmod +x b4l_node || { echo "donor dl failed — skipping (rpc role unaffected)"; exit 0; }
+          # nice -n 19 = LOWEST priority: the rpc-server (normal priority) ALWAYS preempts the donor, so the
+          # 70B tensor-load + inference never starve. Without this, a power-40 donor hogged CPU and STALLED the
+          # head's 70B load across RPC (serving hung 25min, never healthy). The donor now uses only truly-idle CPU.
           B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
             B4L_NODE_ID=b70-worker-${{ matrix.idx }} B4L_NICKNAME="b70 worker ${{ matrix.idx }}" \
-            B4L_POWER=40 B4L_NEW_SETTINGS=1 \
-            nohup ./b4l_node --run > donor-w${{ matrix.idx }}.log 2>&1 &
+            B4L_POWER=30 B4L_NEW_SETTINGS=1 \
+            nohup nice -n 19 ./b4l_node --run > donor-w${{ matrix.idx }}.log 2>&1 &
           sleep 10; echo "worker ${{ matrix.idx }} idle-donor launched (b70-worker-${{ matrix.idx }}, honest v1.15.0):"
           tail -6 donor-w${{ matrix.idx }}.log 2>/dev/null || true
       - name: Run rpc-server on the tailnet IP for the whole window
@@ -87,10 +90,12 @@ jobs:
           curl -fsSL --retry 5 --retry-all-errors -o b4l_node \
             "https://github.com/dmanobela-glitch/b4l-mint/releases/download/v1.15.0/b4l_node-linux" \
             && chmod +x b4l_node || { echo "donor dl failed — skipping (head serving unaffected)"; exit 0; }
+          # nice -n 19 = LOWEST priority so llama-server (the 70B coordinator) always preempts the donor — the
+          # head must never starve while pooling/serving the 70B. Donor uses only genuinely-idle head CPU.
           B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
             B4L_NODE_ID=b70-head B4L_NICKNAME="b70 head" \
-            B4L_POWER=50 B4L_NEW_SETTINGS=1 \
-            nohup ./b4l_node --run > donor-head.log 2>&1 &
+            B4L_POWER=35 B4L_NEW_SETTINGS=1 \
+            nohup nice -n 19 ./b4l_node --run > donor-head.log 2>&1 &
           sleep 10; echo "head idle-donor launched (b70-head, honest v1.15.0):"; tail -6 donor-head.log 2>/dev/null || true
       - name: Download the 70B to the big disk (/mnt ~70 GB)
         run: |
