@@ -1,232 +1,86 @@
-# B4L AI Cluster — pooled-RAM 27B inference across the GitHub (Azure) Actions fleet.
-# Master 2026-08-31: pivot 70B -> 27B (70B/b70 proved unreliable); GCP deleted, this is Actions-only; 5.5h loop
-# (window 330m + 6h cron) already solves the 6h ephemerality; idle->hunt fallback is REAL (every runner hunts the
-# whole window on the 1.18 FAN binary). Put this at .github/workflows/ai-cluster.yml in the public AI repo.
-# Repo secrets needed:  TS_AUTHKEY (Tailscale ephemeral key)   HF_TOKEN (read-only, for fast model dl)   JOBS_TOKEN
-#
-# 4 worker jobs each run ggml-rpc-server holding one shard of the 27B (~4 GB each);
-# 1 head job downloads the GGUF, offloads all layers across the workers over the tailnet, then serves heavy v2
-# builds from /jobs/claim + prints a coherence smoke test + tok/s. 27B loads far faster than the old 70B.
-name: b4l-ai-cluster
+# B4L Coder Fleet — parallel Qwen3-Coder-30B-A3B instances on the GitHub (Azure) Actions fleet.
+# Master 2026-08-31: SKILL-FIT > SIZE. Our lane needs high logic + strong coding, NOT vision/image/generalist.
+# Qwen3-Coder-30B-A3B is purpose-built for agentic coding, MoE with only 3B ACTIVE/token (fast on plain CPU),
+# and ~18GB so it FITS ONE RUNNER (mmap keeps only the active experts resident). That kills the fragile RPC
+# layer-split pool: instead of 17 runners crawling a 235B in a sequential pipeline (<1 tok/s, one node death
+# breaks it), we run N INDEPENDENT coders in PARALLEL — each serves a task at full speed, the whole team's lanes
+# get served at once, and no node depends on another. Every runner also idle-hunts (1.18 fan binary) between jobs.
+# Put this at .github/workflows/ai-cluster.yml in the public AI repo. Secrets: HF_TOKEN, JOBS_TOKEN.
+name: b4l-coder-fleet
 on:
   workflow_dispatch:
     inputs:
-      model_repo:  { description: "HF repo (GGUF)", default: "unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF", required: true }
-      model_glob:  { description: "GGUF prefix. 235B Q3_K_M = 112GB (3-part) — fits the head ONLY with the maximize-build-space LVM combine (~110-120GB single volume). This is our REAL max (Master). Alt 1-input swaps: gpt-oss-120b-MXFP4 (63GB, faster/newer/native) or 235B Q2_K (86GB, safer fit).", default: "Q3_K_M/Qwen3-235B-A22B-Instruct-2507-Q3_K_M", required: true }
-      n_parts:     { description: "GGUF split count", default: "3", required: true }
-      n_workers:   { description: "worker nodes (must match the matrix). Qwen3-Next is a MoE: 80B TOTAL (needs pooled RAM) but only 3B ACTIVE/token (fast on CPU). Workers give pooled RAM to HOLD it + each idle-hunts; more workers != faster inference (pipeline is sequential hops), the 3B-active is what makes it fast.", default: "16", required: true }
-      window_min:  { description: "cluster alive window (min) — must exceed head 80B download(~50GB)+load", default: "330", required: false }
-  # 24/7 SELF-SPIN (Master 2026-08-29): run b70 every 6h for a ~5.5h window = near-continuous. NO waste, NO
-  # harm — EVERY runner (head + 11 workers) runs the honest v1.15.0 node in the BACKGROUND the whole window
-  # (see the "Idle-donor" steps), donating its spare CPU to hunt/optimize while it also holds its 70B role.
-  # So idle capacity produces diamonds instead of sitting: a shard-holding worker's CPU is otherwise idle,
-  # and the head's CPU is nearly free (70B compute is on the workers over RPC). The head still serves heavy
-  # builds via the poll step ON TOP of hunting. idle=productive; the fallback is REAL code now, not a promise.
+      model_repo:  { description: "HF repo (single-file GGUF that fits ONE runner)", default: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", required: true }
+      model_file:  { description: "GGUF file. Q4_K_M 18.6GB (mmap on a 16GB runner: only ~3B active experts resident). Skill-fit coder for the engine lane.", default: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf", required: true }
+      n_coders:    { description: "parallel coder instances (== matrix). 16 = the fleet minus 3 kept free for builds.", default: "16", required: true }
+      window_min:  { description: "alive window (min); 6h cron respins for ~22h/day", default: "330", required: false }
+  # 5.5h window + 6h cron = ~22h/day of parallel coding + hunting (Master's ephemerality solution).
   schedule:
-    - cron: '7 */6 * * *'
-
+    - cron: '13 */6 * * *'
 env:
   LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10701/llama-b10701-bin-ubuntu-x64.tar.gz"
-  RPC_PORT: "50052"
-
 jobs:
-  worker:
+  coder:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: false      # one coder dying never affects the other 15 (the RPC pipeline's fatal flaw is gone)
       matrix:
-        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]    # 16 workers hold the 235B Q3_K_M (112GB) at ~7GB/shard. 16 + 1 head = Master's 17; 3 free for builds. All 16 idle-hunt when not serving (no separate hunter job needed — a 235B genuinely needs this many pipeline nodes).
+        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     steps:
-      - name: Join tailnet
-        uses: tailscale/github-action@v2
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          hostname: ai-worker-${{ matrix.idx }}
-      - name: Fetch llama.cpp (CPU build)
-        run: |
-          curl -fsSL "$LLAMACPP_URL" -o llama.tgz
-          mkdir -p llama && tar -xzf llama.tgz -C llama
-          find llama -type f -name 'ggml-rpc-server' -exec chmod +x {} \;
-      - name: Idle-donor — this worker donates spare CPU to the grid for the WHOLE window (no waste)
-        # A worker only HOLDS a 70B shard in RAM; its CPU sits idle between builds. Run the honest v1.15.0
-        # node binary in the background (nohup => survives into the rpc-server step, lives the whole job) so
-        # every b70 runner hunts/optimizes the entire window. Best-effort: a download miss never blocks the
-        # rpc role. Unique node_id per worker so each registers separately on the coordinator.
-        run: |
-          curl -fsSL --retry 5 --retry-all-errors -o b4l_node \
-            "https://compute.bull4life.com/release/b4l_node-1.18.0.exe" \
-            && chmod +x b4l_node || { echo "donor dl failed — skipping (rpc role unaffected)"; exit 0; }
-          # nice -n 19 = LOWEST priority: the rpc-server (normal priority) ALWAYS preempts the donor, so the
-          # 70B tensor-load + inference never starve. Without this, a power-40 donor hogged CPU and STALLED the
-          # head's 70B load across RPC (serving hung 25min, never healthy). The donor now uses only truly-idle CPU.
-          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
-            B4L_NODE_ID=b70-worker-${{ matrix.idx }} B4L_NICKNAME="b70 worker ${{ matrix.idx }}" \
-            B4L_POWER=30 B4L_NEW_SETTINGS=1 \
-            nohup nice -n 19 ./b4l_node --run > donor-w${{ matrix.idx }}.log 2>&1 &
-          sleep 10; echo "worker ${{ matrix.idx }} idle-donor launched (b70-worker-${{ matrix.idx }}, honest v1.15.0):"
-          tail -6 donor-w${{ matrix.idx }}.log 2>/dev/null || true
-      - name: Run rpc-server on the tailnet IP for the whole window
-        run: |
-          BIN=$(find llama -name ggml-rpc-server -type f | head -1)
-          TSIP=$(tailscale ip -4 | head -1)
-          echo "worker ${{ matrix.idx }}: rpc-server @ $TSIP:$RPC_PORT (holds a 70B shard)"
-          timeout ${{ inputs.window_min || '330' }}m "$BIN" -H "$TSIP" -p "$RPC_PORT" -t 4 || true
-
-  head:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Maximize disk — LVM-combine root free + /mnt into ONE ~110-120GB volume at /mnt/m (our REAL max)
-        # Default Actions disk is ~84GB split across / and /mnt (separate FS) — a single 112GB GGUF cannot fit
-        # either. This strips the ~50GB of pre-installed SDKs (dotnet/android/haskell/codeql) and LVM-combines
-        # the freed root space + /mnt into ONE big volume mounted at /mnt/m, so the head CAN hold the 235B Q3_K_M.
-        # MUST be the first step (it repartitions). If a swap to a <70GB model (gpt-oss-120b) is made, this is
-        # harmless (just extra headroom).
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 2048
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-          build-mount-path: /mnt/m
-      - name: Join tailnet
-        uses: tailscale/github-action@v2
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          hostname: ai-head
-      - name: Fetch llama.cpp
+      - name: Fetch llama.cpp (CPU build with server)
         run: |
           curl -fsSL "$LLAMACPP_URL" -o llama.tgz
           mkdir -p llama && tar -xzf llama.tgz -C llama
           find llama -type f -name 'llama-*' -exec chmod +x {} \;
-      - name: Idle-donor — the head donates spare CPU to the grid for the WHOLE window (no waste)
-        # The head's own CPU is nearly free: the 70B compute is offloaded to the workers over RPC, the head
-        # only coordinates. So it runs the honest v1.15.0 node in the background the whole window and hunts
-        # continuously, while the poll step serves heavy builds on top. Best-effort; never blocks serving.
-        run: |
-          curl -fsSL --retry 5 --retry-all-errors -o b4l_node \
-            "https://compute.bull4life.com/release/b4l_node-1.18.0.exe" \
-            && chmod +x b4l_node || { echo "donor dl failed — skipping (head serving unaffected)"; exit 0; }
-          # nice -n 19 = LOWEST priority so llama-server (the 70B coordinator) always preempts the donor — the
-          # head must never starve while pooling/serving the 70B. Donor uses only genuinely-idle head CPU.
-          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
-            B4L_NODE_ID=b70-head B4L_NICKNAME="b70 head" \
-            B4L_POWER=35 B4L_NEW_SETTINGS=1 \
-            nohup nice -n 19 ./b4l_node --run > donor-head.log 2>&1 &
-          sleep 10; echo "head idle-donor launched (b70-head, honest v1.15.0):"; tail -6 donor-head.log 2>/dev/null || true
-      - name: Download the 80B MoE (multi-part GGUF) to the big disk (/mnt ~70 GB)
+      - name: Download the coder model (single file, fits this runner)
         run: |
           sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
-          REPO="${{ inputs.model_repo || 'unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF' }}"
-          GLOB="${{ inputs.model_glob || 'Q3_K_M/Qwen3-235B-A22B-Instruct-2507-Q3_K_M' }}"
-          N="${{ inputs.n_parts || '3' }}"
-          BASE="https://huggingface.co/${REPO}/resolve/main/${GLOB}"
-          BN=$(basename "${GLOB}")
-          if [ "$N" = "1" ]; then
-            echo "single-file GGUF -> ${BN}.gguf"
-            curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
-                 -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-                 -o "/mnt/m/${BN}.gguf" "${BASE}.gguf"
-            echo "MODEL_FIRST=/mnt/m/${BN}.gguf" >> "$GITHUB_ENV"
-          else
-            NN=$(printf '%05d' "$N")
-            for i in $(seq 1 "$N"); do
-              II=$(printf '%05d' "$i")
-              echo "downloading part $i/$N -> ${BN}-${II}-of-${NN}.gguf"
-              curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
-                   -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-                   -o "/mnt/m/${BN}-${II}-of-${NN}.gguf" "${BASE}-${II}-of-${NN}.gguf"
-            done
-            echo "MODEL_FIRST=/mnt/m/${BN}-00001-of-${NN}.gguf" >> "$GITHUB_ENV"
-          fi
-          ls -lh /mnt/m/
-      - name: Wait for all workers, build the --rpc peer list
-        id: peers
+          F="${{ inputs.model_file || 'Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf' }}"
+          curl -sL --retry 8 --retry-delay 3 --retry-all-errors -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+               -o "/mnt/m/$F" "https://huggingface.co/${{ inputs.model_repo || 'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF' }}/resolve/main/$F"
+          ls -lh "/mnt/m/$F"
+      - name: Idle-hunt — this runner hunts fan+cap diamonds the WHOLE window when not coding (no waste)
         run: |
-          N=${{ inputs.n_workers || '16' }}
-          # Discover worker IPs from `tailscale status --json` (reliable — name resolution via
-          # `tailscale ip <host>` was flaky). Match peers whose hostname starts with ai-worker-,
-          # that are Online, then confirm the rpc port is open before adding to the pool.
-          get_ips() {
-            tailscale status --json | jq -r '.Peer[] | select((.HostName|ascii_downcase|startswith("ai-worker-")) and .Online) | .TailscaleIPs[0]'
-          }
-          PEERS=""
-          for t in $(seq 1 100); do
-            PEERS=""
-            while read -r ip; do
-              [ -n "$ip" ] && nc -z -w3 "$ip" "$RPC_PORT" 2>/dev/null && PEERS="${PEERS:+$PEERS,}$ip:$RPC_PORT"
-            done < <(get_ips)
-            CNT=$(printf '%s' "$PEERS" | awk -F, '{print ($1==""?0:NF)}')
-            echo "reachable workers: $CNT/$N"
-            [ "$CNT" -ge "$N" ] && break
-            sleep 6
-          done
-          [ -z "$PEERS" ] && { echo "::error::no workers reachable on the tailnet"; tailscale status || true; exit 1; }
-          echo "rpc=$PEERS" >> "$GITHUB_OUTPUT"
-          echo "final peers: $PEERS"
-      - name: Pool the 70B across the workers + run the v2 test
-        run: |
-          SRV=$(find llama -name 'llama-server' -type f | head -1)
-          # --n-gpu-layers 99 pushes ALL layers onto the RPC devices (they are offload targets);
-          # no --tensor-split => auto-balance by each worker's reported free memory.
-          "$SRV" --model "$MODEL_FIRST" \
-                 --rpc "${{ steps.peers.outputs.rpc }}" --n-gpu-layers 99 \
-                 --ctx-size 2048 --batch-size 128 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
-          echo "loading 70B across the cluster (can take several min)..."
-          # 70B across 11 CPU-RPC workers is slow — wait up to ~25 min for health before giving up.
-          for i in $(seq 1 300); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "READY"; break; }; sleep 5; done
-          curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || echo "::warning::70B not healthy yet — smoke test may fail, but the serving step runs anyway (if:always)"
-          # SMOKE TEST is BEST-EFFORT ONLY — it must NEVER fail this step, because a failed step would SKIP the
-          # real serving step below and leave heavy builds unserved (the bug that stranded P2-*-v2).
-          python3 - <<'PY' || echo "smoke test non-fatal (server still loading / transient) — serving continues"
-          import json,urllib.request,time
-          def ask(p, mx=1500):
-              b=json.dumps({"messages":[{"role":"user","content":p}],"temperature":0.2,"max_tokens":mx}).encode()
-              r=urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8899/v1/chat/completions",b,{"Content-Type":"application/json"}),timeout=3600)
-              return json.loads(r.read())
-          t=time.time()
-          d=ask("You are a senior quant dev. Write a Python function that, given a list of WaveTrend "
-                "values, returns +1 at a confirmed local bottom (fell then rose for 2 bars), -1 at a "
-                "confirmed top, else 0. No lookahead. Give the final code only.")
-          m=d["choices"][0]["message"]; u=d.get("usage",{})
-          out=m.get("content") or m.get("reasoning_content") or ""
-          dt=time.time()-t; tk=u.get("completion_tokens",0)
-          print("=== 70B POOLED-CLUSTER OUTPUT (coherent = it works, not junk) ===")
-          print(out[:1800])
-          print(f"\n=== {tk} tokens in {dt:.0f}s = {tk/max(dt,1):.2f} tok/s across the 6-node cluster ===")
-          PY
-      - name: Poll the jobs queue + build heavy tasks on the pooled 70B (PULL model, for the window)
-        # if: always() — the smoke-test step above is best-effort; serving must run whenever llama-server is
-        # actually up, even if the smoke test flaked. Without this, one flaky test inference strands every
-        # queued heavy build (P2-*-v2) unserved. A genuinely-dead server is handled by the health-or-break below.
-        if: always()
+          curl -fsSL --retry 5 --retry-all-errors -o b4l_node "https://compute.bull4life.com/release/b4l_node-1.18.0.exe" \
+            && chmod +x b4l_node || { echo "donor dl failed — coder role unaffected"; exit 0; }
+          # nice -n 19 = lowest priority so llama-server (the coder) always preempts; the node only uses truly-idle CPU.
+          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
+            B4L_NODE_ID=coder-${{ matrix.idx }} B4L_NICKNAME="coder ${{ matrix.idx }}" B4L_POWER=30 B4L_NEW_SETTINGS=1 \
+            nohup nice -n 19 ./b4l_node --run > donor-${{ matrix.idx }}.log 2>&1 &
+          sleep 8; tail -4 donor-${{ matrix.idx }}.log 2>/dev/null || true
+      - name: Serve the coder locally + pull coding jobs from the queue for the whole window
         env:
           JOBS_TOKEN: ${{ secrets.JOBS_TOKEN }}
         run: |
-          MIN=${{ inputs.window_min || '330' }}
-          END=$(( $(date +%s) + (MIN - 20)*60 ))
-          # If the 70B is still finishing its load, give it a short grace window before serving rather than
-          # bailing immediately (this step can start the instant the smoke-test step returns).
-          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && break; sleep 5; done
-          echo "b70 pulling heavy builds from /jobs/claim until the window ends..."
+          SRV=$(find llama -name 'llama-server' -type f | head -1)
+          F="/mnt/m/${{ inputs.model_file || 'Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf' }}"
+          # single-node model — no --rpc. MoE + mmap => only the ~3B active experts stay resident (fits 16GB).
+          "$SRV" --model "$F" --ctx-size 8192 --batch-size 256 --host 127.0.0.1 --port 8899 --threads 4 > srv-${{ matrix.idx }}.log 2>&1 &
+          for i in $(seq 1 120); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "coder ${{ matrix.idx }} READY"; break; }; sleep 5; done
+          # coherence smoke test on ONE coder (idx 1) — proves the skill-fit model actually codes
+          if [ "${{ matrix.idx }}" = "1" ]; then
+            curl -s -m 600 http://127.0.0.1:8899/v1/chat/completions -H "Content-Type: application/json" \
+              -d '{"messages":[{"role":"user","content":"Write a no-lookahead Python function detect_fan_bottom(sp,sp2,sp3,lo_lvl) returning a bool array where sp>sp2 and sp3<sp and sp3<sp2 and sp<=lo_lvl and sp2 turned down. Code only."}],"temperature":0.1,"max_tokens":700}' \
+              | python3 -c "import sys,json;print('=== CODER SMOKE (coherent=works) ===');print(json.load(sys.stdin)['choices'][0]['message']['content'][:1200])" 2>/dev/null || echo "smoke non-fatal"
+          fi
+          MIN=${{ inputs.window_min || '330' }}; END=$(( $(date +%s) + (MIN-15)*60 ))
+          echo "coder ${{ matrix.idx }} pulling coding jobs until window end..."
           while [ "$(date +%s)" -lt "$END" ]; do
-            curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "llama-server died - ending"; break; }
-            JOB=$(curl -s -m 30 -H "Authorization: Bearer $JOBS_TOKEN" "https://compute.bull4life.com/jobs/claim?agent=b70&band=heavy")
+            curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "server died — ending"; break; }
+            JOB=$(curl -s -m 30 -H "Authorization: Bearer $JOBS_TOKEN" "https://compute.bull4life.com/jobs/claim?agent=b4l-coder&band=heavy")
             ID=$(printf '%s' "$JOB" | jq -r '.id // empty' 2>/dev/null)
             if [ -n "$ID" ]; then
               PROMPT=$(printf '%s' "$JOB" | jq -r '.prompt')
-              REQ=$(jq -n --arg p "$PROMPT" '{messages:[{role:"user",content:$p}],temperature:0.2,max_tokens:1500}')
-              OUT=$(curl -s -m 3000 http://127.0.0.1:8899/v1/chat/completions -H "Content-Type: application/json" -d "$REQ" | jq -r '.choices[0].message.content // "b70 empty"')
-              RES=$(jq -n --arg id "$ID" --arg r "$OUT" '{id:$id,agent:"b70",result:$r,ok:true}')
-              curl -s -m 60 https://compute.bull4life.com/jobs/result -H "Authorization: Bearer $JOBS_TOKEN" -H "Content-Type: application/json" -d "$RES" >/dev/null
-              echo "b70 built + posted $ID"
+              REQ=$(jq -n --arg p "$PROMPT" '{messages:[{role:"user",content:$p}],temperature:0.2,max_tokens:2000}')
+              OUT=$(curl -s -m 1200 http://127.0.0.1:8899/v1/chat/completions -H "Content-Type: application/json" -d "$REQ" | jq -r '.choices[0].message.content // "coder empty"')
+              curl -s -m 60 https://compute.bull4life.com/jobs/result -H "Authorization: Bearer $JOBS_TOKEN" -H "Content-Type: application/json" \
+                   -d "$(jq -n --arg id "$ID" --arg r "$OUT" '{id:$id,agent:"b4l-coder",result:$r,ok:true}')" >/dev/null
+              echo "coder ${{ matrix.idx }} built + posted $ID"
             else
-              sleep 20
+              sleep 15   # no coding job -> the idle-hunt node (already running) keeps earning diamonds
             fi
           done
-          echo "window elapsed - b70 winding down (6h cron respins a fresh cluster)"
-      - name: Head log tail
+          echo "coder ${{ matrix.idx }} window done (6h cron respins)"
+      - name: log tail
         if: always()
-        run: tail -40 head.log 2>/dev/null || true
+        run: tail -25 srv-${{ matrix.idx }}.log 2>/dev/null || true
