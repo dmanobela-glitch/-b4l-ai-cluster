@@ -11,9 +11,9 @@ name: b4l-ai-cluster
 on:
   workflow_dispatch:
     inputs:
-      model_repo:  { description: "HF repo (multi-part GGUF)", default: "unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF", required: true }
-      model_glob:  { description: "quant folder/prefix (2-part ~50GB, FITS the head's ~70GB /mnt)", default: "Q4_1/Qwen3-Next-80B-A3B-Instruct-Q4_1", required: true }
-      n_parts:     { description: "GGUF split count", default: "2", required: true }
+      model_repo:  { description: "HF repo (GGUF)", default: "ggml-org/gpt-oss-120b-GGUF", required: true }
+      model_glob:  { description: "GGUF file/prefix. gpt-oss-120b MXFP4 = 63GB SINGLE file, FITS the head's ~70GB disk; 117B total / ~5B active = CPU-fast; ggml-org release = guaranteed llama.cpp support", default: "gpt-oss-120b-MXFP4", required: true }
+      n_parts:     { description: "GGUF split count (1 = single file)", default: "1", required: true }
       n_workers:   { description: "worker nodes (must match the matrix). Qwen3-Next is a MoE: 80B TOTAL (needs pooled RAM) but only 3B ACTIVE/token (fast on CPU). Workers give pooled RAM to HOLD it + each idle-hunts; more workers != faster inference (pipeline is sequential hops), the 3B-active is what makes it fast.", default: "10", required: true }
       window_min:  { description: "cluster alive window (min) — must exceed head 80B download(~50GB)+load", default: "330", required: false }
   # 24/7 SELF-SPIN (Master 2026-08-29): run b70 every 6h for a ~5.5h window = near-continuous. NO waste, NO
@@ -107,16 +107,24 @@ jobs:
           GLOB="${{ inputs.model_glob || 'Q4_1/Qwen3-Next-80B-A3B-Instruct-Q4_1' }}"
           N="${{ inputs.n_parts || '2' }}"
           BASE="https://huggingface.co/${REPO}/resolve/main/${GLOB}"
-          NN=$(printf '%05d' "$N")
-          for i in $(seq 1 "$N"); do
-            II=$(printf '%05d' "$i")
-            F="$(basename "${GLOB}")-${II}-of-${NN}.gguf"
-            echo "downloading part $i/$N -> $F"
+          BN=$(basename "${GLOB}")
+          if [ "$N" = "1" ]; then
+            echo "single-file GGUF -> ${BN}.gguf"
             curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
                  -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-                 -o "/mnt/m/${F}" "${BASE}-${II}-of-${NN}.gguf"
-          done
-          echo "MODEL_FIRST=/mnt/m/$(basename "${GLOB}")-00001-of-${NN}.gguf" >> "$GITHUB_ENV"
+                 -o "/mnt/m/${BN}.gguf" "${BASE}.gguf"
+            echo "MODEL_FIRST=/mnt/m/${BN}.gguf" >> "$GITHUB_ENV"
+          else
+            NN=$(printf '%05d' "$N")
+            for i in $(seq 1 "$N"); do
+              II=$(printf '%05d' "$i")
+              echo "downloading part $i/$N -> ${BN}-${II}-of-${NN}.gguf"
+              curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
+                   -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+                   -o "/mnt/m/${BN}-${II}-of-${NN}.gguf" "${BASE}-${II}-of-${NN}.gguf"
+            done
+            echo "MODEL_FIRST=/mnt/m/${BN}-00001-of-${NN}.gguf" >> "$GITHUB_ENV"
+          fi
           ls -lh /mnt/m/
       - name: Wait for all workers, build the --rpc peer list
         id: peers
