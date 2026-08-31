@@ -11,10 +11,10 @@ name: b4l-ai-cluster
 on:
   workflow_dispatch:
     inputs:
-      model_repo:  { description: "HF repo (GGUF)", default: "ggml-org/gpt-oss-120b-GGUF", required: true }
-      model_glob:  { description: "GGUF file/prefix. gpt-oss-120b MXFP4 = 63GB SINGLE file, FITS the head's ~70GB disk; 117B total / ~5B active = CPU-fast; ggml-org release = guaranteed llama.cpp support", default: "gpt-oss-120b-MXFP4", required: true }
-      n_parts:     { description: "GGUF split count (1 = single file)", default: "1", required: true }
-      n_workers:   { description: "worker nodes (must match the matrix). Qwen3-Next is a MoE: 80B TOTAL (needs pooled RAM) but only 3B ACTIVE/token (fast on CPU). Workers give pooled RAM to HOLD it + each idle-hunts; more workers != faster inference (pipeline is sequential hops), the 3B-active is what makes it fast.", default: "10", required: true }
+      model_repo:  { description: "HF repo (GGUF)", default: "unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF", required: true }
+      model_glob:  { description: "GGUF prefix. 235B Q3_K_M = 112GB (3-part) — fits the head ONLY with the maximize-build-space LVM combine (~110-120GB single volume). This is our REAL max (Master). Alt 1-input swaps: gpt-oss-120b-MXFP4 (63GB, faster/newer/native) or 235B Q2_K (86GB, safer fit).", default: "Q3_K_M/Qwen3-235B-A22B-Instruct-2507-Q3_K_M", required: true }
+      n_parts:     { description: "GGUF split count", default: "3", required: true }
+      n_workers:   { description: "worker nodes (must match the matrix). Qwen3-Next is a MoE: 80B TOTAL (needs pooled RAM) but only 3B ACTIVE/token (fast on CPU). Workers give pooled RAM to HOLD it + each idle-hunts; more workers != faster inference (pipeline is sequential hops), the 3B-active is what makes it fast.", default: "16", required: true }
       window_min:  { description: "cluster alive window (min) — must exceed head 80B download(~50GB)+load", default: "330", required: false }
   # 24/7 SELF-SPIN (Master 2026-08-29): run b70 every 6h for a ~5.5h window = near-continuous. NO waste, NO
   # harm — EVERY runner (head + 11 workers) runs the honest v1.15.0 node in the BACKGROUND the whole window
@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]    # keep in sync with n_workers. 10 = pooled RAM to hold the 80B MoE with headroom + 10 idle-hunters (Master: spin to the fleet)
+        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]    # 16 workers hold the 235B Q3_K_M (112GB) at ~7GB/shard. 16 + 1 head = Master's 17; 3 free for builds. All 16 idle-hunt when not serving (no separate hunter job needed — a 235B genuinely needs this many pipeline nodes).
     steps:
       - name: Join tailnet
         uses: tailscale/github-action@v2
@@ -75,6 +75,22 @@ jobs:
   head:
     runs-on: ubuntu-latest
     steps:
+      - name: Maximize disk — LVM-combine root free + /mnt into ONE ~110-120GB volume at /mnt/m (our REAL max)
+        # Default Actions disk is ~84GB split across / and /mnt (separate FS) — a single 112GB GGUF cannot fit
+        # either. This strips the ~50GB of pre-installed SDKs (dotnet/android/haskell/codeql) and LVM-combines
+        # the freed root space + /mnt into ONE big volume mounted at /mnt/m, so the head CAN hold the 235B Q3_K_M.
+        # MUST be the first step (it repartitions). If a swap to a <70GB model (gpt-oss-120b) is made, this is
+        # harmless (just extra headroom).
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          build-mount-path: /mnt/m
       - name: Join tailnet
         uses: tailscale/github-action@v2
         with:
@@ -103,9 +119,9 @@ jobs:
       - name: Download the 80B MoE (multi-part GGUF) to the big disk (/mnt ~70 GB)
         run: |
           sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
-          REPO="${{ inputs.model_repo || 'unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF' }}"
-          GLOB="${{ inputs.model_glob || 'Q4_1/Qwen3-Next-80B-A3B-Instruct-Q4_1' }}"
-          N="${{ inputs.n_parts || '2' }}"
+          REPO="${{ inputs.model_repo || 'unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF' }}"
+          GLOB="${{ inputs.model_glob || 'Q3_K_M/Qwen3-235B-A22B-Instruct-2507-Q3_K_M' }}"
+          N="${{ inputs.n_parts || '3' }}"
           BASE="https://huggingface.co/${REPO}/resolve/main/${GLOB}"
           BN=$(basename "${GLOB}")
           if [ "$N" = "1" ]; then
@@ -129,7 +145,7 @@ jobs:
       - name: Wait for all workers, build the --rpc peer list
         id: peers
         run: |
-          N=${{ inputs.n_workers || '10' }}
+          N=${{ inputs.n_workers || '16' }}
           # Discover worker IPs from `tailscale status --json` (reliable — name resolution via
           # `tailscale ip <host>` was flaky). Match peers whose hostname starts with ai-worker-,
           # that are Online, then confirm the rpc port is open before adding to the pool.
