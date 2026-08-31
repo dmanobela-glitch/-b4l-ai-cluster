@@ -11,10 +11,11 @@ name: b4l-ai-cluster
 on:
   workflow_dispatch:
     inputs:
-      model_url:   { description: "GGUF url", default: "https://huggingface.co/bartowski/gemma-2-27b-it-GGUF/resolve/main/gemma-2-27b-it-Q4_K_M.gguf", required: true }
-      model_file:  { description: "GGUF filename", default: "gemma-2-27b-it-Q4_K_M.gguf", required: true }
-      n_workers:   { description: "worker nodes (must match the matrix below). 27B Q4 ~16GB -> 4 shards ~4GB each = fast RPC, few hops", default: "4", required: true }
-      window_min:  { description: "cluster alive window (min) — must exceed head 27B download+load (27B loads far faster than 70B)", default: "330", required: false }
+      model_repo:  { description: "HF repo (multi-part GGUF)", default: "unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF", required: true }
+      model_glob:  { description: "quant folder/prefix (2-part ~50GB, FITS the head's ~70GB /mnt)", default: "Q4_1/Qwen3-Next-80B-A3B-Instruct-Q4_1", required: true }
+      n_parts:     { description: "GGUF split count", default: "2", required: true }
+      n_workers:   { description: "worker nodes (must match the matrix). Qwen3-Next is a MoE: 80B TOTAL (needs pooled RAM) but only 3B ACTIVE/token (fast on CPU). Workers give pooled RAM to HOLD it + each idle-hunts; more workers != faster inference (pipeline is sequential hops), the 3B-active is what makes it fast.", default: "10", required: true }
+      window_min:  { description: "cluster alive window (min) — must exceed head 80B download(~50GB)+load", default: "330", required: false }
   # 24/7 SELF-SPIN (Master 2026-08-29): run b70 every 6h for a ~5.5h window = near-continuous. NO waste, NO
   # harm — EVERY runner (head + 11 workers) runs the honest v1.15.0 node in the BACKGROUND the whole window
   # (see the "Idle-donor" steps), donating its spare CPU to hunt/optimize while it also holds its 70B role.
@@ -25,7 +26,7 @@ on:
     - cron: '7 */6 * * *'
 
 env:
-  LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10655/llama-b10655-bin-ubuntu-x64.tar.gz"
+  LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10701/llama-b10701-bin-ubuntu-x64.tar.gz"
   RPC_PORT: "50052"
 
 jobs:
@@ -34,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        idx: [1, 2, 3, 4]    # keep in sync with n_workers. 27B needs only ~4 shards (~4GB each); fewer hops = faster tok/s than the old 11-way 70B split
+        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]    # keep in sync with n_workers. 10 = pooled RAM to hold the 80B MoE with headroom + 10 idle-hunters (Master: spin to the fleet)
     steps:
       - name: Join tailnet
         uses: tailscale/github-action@v2
@@ -99,17 +100,28 @@ jobs:
             B4L_POWER=35 B4L_NEW_SETTINGS=1 \
             nohup nice -n 19 ./b4l_node --run > donor-head.log 2>&1 &
           sleep 10; echo "head idle-donor launched (b70-head, honest v1.15.0):"; tail -6 donor-head.log 2>/dev/null || true
-      - name: Download the 70B to the big disk (/mnt ~70 GB)
+      - name: Download the 80B MoE (multi-part GGUF) to the big disk (/mnt ~70 GB)
         run: |
           sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
-          curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
-               -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-               -o "/mnt/m/${{ inputs.model_file || 'Llama-3.3-70B-Instruct-Q4_K_M.gguf' }}" "${{ inputs.model_url || 'https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf' }}"
-          ls -lh "/mnt/m/${{ inputs.model_file || 'Llama-3.3-70B-Instruct-Q4_K_M.gguf' }}"
+          REPO="${{ inputs.model_repo || 'unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF' }}"
+          GLOB="${{ inputs.model_glob || 'Q4_1/Qwen3-Next-80B-A3B-Instruct-Q4_1' }}"
+          N="${{ inputs.n_parts || '2' }}"
+          BASE="https://huggingface.co/${REPO}/resolve/main/${GLOB}"
+          NN=$(printf '%05d' "$N")
+          for i in $(seq 1 "$N"); do
+            II=$(printf '%05d' "$i")
+            F="$(basename "${GLOB}")-${II}-of-${NN}.gguf"
+            echo "downloading part $i/$N -> $F"
+            curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
+                 -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+                 -o "/mnt/m/${F}" "${BASE}-${II}-of-${NN}.gguf"
+          done
+          echo "MODEL_FIRST=/mnt/m/$(basename "${GLOB}")-00001-of-${NN}.gguf" >> "$GITHUB_ENV"
+          ls -lh /mnt/m/
       - name: Wait for all workers, build the --rpc peer list
         id: peers
         run: |
-          N=${{ inputs.n_workers || '11' }}
+          N=${{ inputs.n_workers || '10' }}
           # Discover worker IPs from `tailscale status --json` (reliable — name resolution via
           # `tailscale ip <host>` was flaky). Match peers whose hostname starts with ai-worker-,
           # that are Online, then confirm the rpc port is open before adding to the pool.
@@ -135,7 +147,7 @@ jobs:
           SRV=$(find llama -name 'llama-server' -type f | head -1)
           # --n-gpu-layers 99 pushes ALL layers onto the RPC devices (they are offload targets);
           # no --tensor-split => auto-balance by each worker's reported free memory.
-          "$SRV" --model "/mnt/m/${{ inputs.model_file || 'Llama-3.3-70B-Instruct-Q4_K_M.gguf' }}" \
+          "$SRV" --model "$MODEL_FIRST" \
                  --rpc "${{ steps.peers.outputs.rpc }}" --n-gpu-layers 99 \
                  --ctx-size 2048 --batch-size 128 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
           echo "loading 70B across the cluster (can take several min)..."
