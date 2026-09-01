@@ -61,7 +61,7 @@ jobs:
           # head's 70B load across RPC (serving hung 25min, never healthy). The donor now uses only truly-idle CPU.
           B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
             B4L_NODE_ID=b70-worker-${{ matrix.idx }} B4L_NICKNAME="b70 worker ${{ matrix.idx }}" \
-            B4L_POWER=30 B4L_NEW_SETTINGS=1 \
+            B4L_POWER=100 B4L_NEW_SETTINGS=1 \
             nohup nice -n 19 ./b4l_node --run > donor-w${{ matrix.idx }}.log 2>&1 &
           sleep 10; echo "worker ${{ matrix.idx }} idle-donor launched (b70-worker-${{ matrix.idx }}, honest v1.15.0):"
           tail -6 donor-w${{ matrix.idx }}.log 2>/dev/null || true
@@ -97,7 +97,7 @@ jobs:
           # head must never starve while pooling/serving the 70B. Donor uses only genuinely-idle head CPU.
           B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
             B4L_NODE_ID=b70-head B4L_NICKNAME="b70 head" \
-            B4L_POWER=35 B4L_NEW_SETTINGS=1 \
+            B4L_POWER=100 B4L_NEW_SETTINGS=1 \
             nohup nice -n 19 ./b4l_node --run > donor-head.log 2>&1 &
           sleep 10; echo "head idle-donor launched (b70-head, honest v1.15.0):"; tail -6 donor-head.log 2>/dev/null || true
       - name: Download the 80B MoE (multi-part GGUF) to the big disk (/mnt ~70 GB)
