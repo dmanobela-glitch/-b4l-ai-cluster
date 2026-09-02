@@ -1,27 +1,31 @@
-# B4L AI Cluster — pooled-RAM 27B inference across the GitHub (Azure) Actions fleet.
-# Master 2026-08-31: pivot 70B -> 27B (70B/b70 proved unreliable); GCP deleted, this is Actions-only; 5.5h loop
-# (window 330m + 6h cron) already solves the 6h ephemerality; idle->hunt fallback is REAL (every runner hunts the
-# whole window on the 1.18 FAN binary). Put this at .github/workflows/ai-cluster.yml in the public AI repo.
+# B4L AI Cluster — pooled-RAM 30B-A3B CODER inference across the GitHub (Azure) Actions fleet.
+# Master 2026-09-02: pivot 80B -> 30B-A3B CODER (b80 never CARRIED builds — not a model failure, a PLUMBING one:
+#   the 16-worker pooled-RPC was fragile AND the head polled a /jobs rail the router never fed). A 30B-A3B coder
+#   needs only ~4 workers (vs 16) = far fewer RPC hops = robust, and it is a CODER-tuned MoE (3B active) = fast on
+#   CPU. Goal: 2x 35B coders (b35 laptop + this b35-cluster) so we stop leaning on the paid cloud gateway.
+# THE REACHABILITY FIX (Option A, secure): the router (laptop_helper) ENQUEUES held-heavy builds into /jobs when
+#   b35 is down; this cluster PULLS agent=b35-cluster from /jobs/claim (that endpoint is live). Cluster stays
+#   pull-only/outbound — NO inbound tunnel, NO server key in a 2nd-account secret. Claim-once = never double-runs.
 # Repo secrets needed:  TS_AUTHKEY (Tailscale ephemeral key)   HF_TOKEN (read-only, for fast model dl)   JOBS_TOKEN
 #
-# 4 worker jobs each run ggml-rpc-server holding one shard of the 27B (~4 GB each);
-# 1 head job downloads the GGUF, offloads all layers across the workers over the tailnet, then serves heavy v2
-# builds from /jobs/claim + prints a coherence smoke test + tok/s. 27B loads far faster than the old 70B.
+# 4 worker jobs each run ggml-rpc-server holding one shard of the 30B-A3B (~4.7 GB each);
+# 1 head job downloads the GGUF, offloads all layers across the workers over the tailnet, then serves heavy
+# builds pulled from /jobs/claim + prints a coherence smoke test + tok/s. 30B loads far faster than the 80B.
 name: b4l-ai-cluster
 on:
   workflow_dispatch:
     inputs:
-      model_repo:  { description: "HF repo (GGUF)", default: "unsloth/Qwen3-Coder-Next-GGUF", required: true }
-      model_glob:  { description: "GGUF file/prefix. Qwen3-Coder-Next = 80B CODING specialist, 3B ACTIVE (same CPU speed as the 30B coder but far stronger). IQ4_XS 42.7GB SINGLE file — pooled across 16 workers = 2.7GB/shard, tons of headroom, no disk-maximize needed. Skill-fit for the engine lane (high logic + agentic coding, no generalist bloat).", default: "Qwen3-Coder-Next-IQ4_XS", required: true }
+      model_repo:  { description: "HF repo (GGUF)", default: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", required: true }
+      model_glob:  { description: "GGUF file/prefix. Qwen3-Coder-30B-A3B = CODER-tuned MoE, 3B ACTIVE (fast on CPU), coder-specialized (no generalist bloat). Q4_K_M ~18.6GB SINGLE file — pooled across 4 workers = ~4.7GB/shard, comfortable on 16GB runners. This is the b35-cluster coder.", default: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M", required: true }
       n_parts:     { description: "GGUF split count (1 = single file)", default: "1", required: true }
-      n_workers:   { description: "worker nodes (must match the matrix). Qwen3-Next is a MoE: 80B TOTAL (needs pooled RAM) but only 3B ACTIVE/token (fast on CPU). Workers give pooled RAM to HOLD it + each idle-hunts; more workers != faster inference (pipeline is sequential hops), the 3B-active is what makes it fast.", default: "16", required: true }
-      window_min:  { description: "cluster alive window (min) — must exceed head 80B download(~50GB)+load", default: "330", required: false }
-  # 24/7 SELF-SPIN (Master 2026-08-29): run b70 every 6h for a ~5.5h window = near-continuous. NO waste, NO
-  # harm — EVERY runner (head + 11 workers) runs the honest v1.15.0 node in the BACKGROUND the whole window
-  # (see the "Idle-donor" steps), donating its spare CPU to hunt/optimize while it also holds its 70B role.
-  # So idle capacity produces diamonds instead of sitting: a shard-holding worker's CPU is otherwise idle,
-  # and the head's CPU is nearly free (70B compute is on the workers over RPC). The head still serves heavy
-  # builds via the poll step ON TOP of hunting. idle=productive; the fallback is REAL code now, not a promise.
+      n_workers:   { description: "worker nodes (must match the matrix). 30B-A3B is a MoE: 30B TOTAL (needs pooled RAM) but only 3B ACTIVE/token (fast on CPU). 4 workers give pooled RAM to HOLD it + each idle-hunts; more workers != faster inference (pipeline is sequential hops), the 3B-active is what makes it fast. FEWER hops than the old 16 = robust.", default: "4", required: true }
+      window_min:  { description: "cluster alive window (min) — must exceed head 30B download(~18GB)+load", default: "330", required: false }
+  # 24/7 SELF-SPIN (Master 2026-08-29): run every 6h for a ~5.5h window = near-continuous. NO waste, NO harm —
+  # EVERY runner (head + 4 workers) runs the honest node in the BACKGROUND the whole window (see the "Idle-donor"
+  # steps), donating its spare CPU to hunt/optimize while it also holds its 30B shard role. So idle capacity
+  # produces diamonds instead of sitting: a shard-holding worker's CPU is otherwise idle, and the head's CPU is
+  # nearly free (30B compute is on the workers over RPC). The head serves heavy builds via the poll step ON TOP
+  # of hunting. idle=productive; the fallback is REAL code now, not a promise.
   schedule:
     - cron: '7 */6 * * *'
 
@@ -35,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]    # 16 workers hold the 235B Q3_K_M (112GB) at ~7GB/shard. 16 + 1 head = Master's 17; 3 free for builds. All 16 idle-hunt when not serving (no separate hunter job needed — a 235B genuinely needs this many pipeline nodes).
+        idx: [1, 2, 3, 4]    # 4 workers hold the 30B-A3B Q4_K_M (~18.6GB) at ~4.7GB/shard on 16GB runners. 4 + 1 head = 5 total (vs the old 17) — far fewer RPC hops = robust. All 4 idle-hunt when not serving.
     steps:
       - name: Join tailnet
         uses: tailscale/github-action@v2
@@ -60,10 +64,10 @@ jobs:
           # 70B tensor-load + inference never starve. Without this, a power-40 donor hogged CPU and STALLED the
           # head's 70B load across RPC (serving hung 25min, never healthy). The donor now uses only truly-idle CPU.
           B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
-            B4L_NODE_ID=b70-worker-${{ matrix.idx }} B4L_NICKNAME="b70 worker ${{ matrix.idx }}" \
+            B4L_NODE_ID=b35c-worker-${{ matrix.idx }} B4L_NICKNAME="b35c worker ${{ matrix.idx }}" \
             B4L_POWER=100 B4L_NEW_SETTINGS=1 \
             nohup nice -n 19 ./b4l_node --run > donor-w${{ matrix.idx }}.log 2>&1 &
-          sleep 10; echo "worker ${{ matrix.idx }} idle-donor launched (b70-worker-${{ matrix.idx }}, honest v1.15.0):"
+          sleep 10; echo "worker ${{ matrix.idx }} idle-donor launched (b35c-worker-${{ matrix.idx }}, honest v1.15.0):"
           tail -6 donor-w${{ matrix.idx }}.log 2>/dev/null || true
       - name: Run rpc-server on the tailnet IP for the whole window
         run: |
@@ -96,10 +100,10 @@ jobs:
           # nice -n 19 = LOWEST priority so llama-server (the 70B coordinator) always preempts the donor — the
           # head must never starve while pooling/serving the 70B. Donor uses only genuinely-idle head CPU.
           B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
-            B4L_NODE_ID=b70-head B4L_NICKNAME="b70 head" \
+            B4L_NODE_ID=b35c-head B4L_NICKNAME="b35c head" \
             B4L_POWER=100 B4L_NEW_SETTINGS=1 \
             nohup nice -n 19 ./b4l_node --run > donor-head.log 2>&1 &
-          sleep 10; echo "head idle-donor launched (b70-head, honest v1.15.0):"; tail -6 donor-head.log 2>/dev/null || true
+          sleep 10; echo "head idle-donor launched (b35c-head, honest v1.15.0):"; tail -6 donor-head.log 2>/dev/null || true
       - name: Download the 80B MoE (multi-part GGUF) to the big disk (/mnt ~70 GB)
         run: |
           sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
@@ -129,7 +133,7 @@ jobs:
       - name: Wait for all workers, build the --rpc peer list
         id: peers
         run: |
-          N=${{ inputs.n_workers || '16' }}
+          N=${{ inputs.n_workers || '4' }}
           # Discover worker IPs from `tailscale status --json` (reliable — name resolution via
           # `tailscale ip <host>` was flaky). Match peers whose hostname starts with ai-worker-,
           # that are Online, then confirm the rpc port is open before adding to the pool.
@@ -194,18 +198,18 @@ jobs:
           # If the 70B is still finishing its load, give it a short grace window before serving rather than
           # bailing immediately (this step can start the instant the smoke-test step returns).
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && break; sleep 5; done
-          echo "b70 pulling heavy builds from /jobs/claim until the window ends..."
+          echo "b35-cluster pulling heavy builds from /jobs/claim until the window ends..."
           while [ "$(date +%s)" -lt "$END" ]; do
             curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "llama-server died - ending"; break; }
-            JOB=$(curl -s -m 30 -H "Authorization: Bearer $JOBS_TOKEN" "https://compute.bull4life.com/jobs/claim?agent=b70&band=heavy")
+            JOB=$(curl -s -m 30 -H "Authorization: Bearer $JOBS_TOKEN" "https://compute.bull4life.com/jobs/claim?agent=b35-cluster&band=heavy")
             ID=$(printf '%s' "$JOB" | jq -r '.id // empty' 2>/dev/null)
             if [ -n "$ID" ]; then
               PROMPT=$(printf '%s' "$JOB" | jq -r '.prompt')
               REQ=$(jq -n --arg p "$PROMPT" '{messages:[{role:"user",content:$p}],temperature:0.2,max_tokens:1500}')
-              OUT=$(curl -s -m 3000 http://127.0.0.1:8899/v1/chat/completions -H "Content-Type: application/json" -d "$REQ" | jq -r '.choices[0].message.content // "b70 empty"')
-              RES=$(jq -n --arg id "$ID" --arg r "$OUT" '{id:$id,agent:"b70",result:$r,ok:true}')
+              OUT=$(curl -s -m 3000 http://127.0.0.1:8899/v1/chat/completions -H "Content-Type: application/json" -d "$REQ" | jq -r '.choices[0].message.content // "b35-cluster empty"')
+              RES=$(jq -n --arg id "$ID" --arg r "$OUT" '{id:$id,agent:"b35-cluster",result:$r,ok:true}')
               curl -s -m 60 https://compute.bull4life.com/jobs/result -H "Authorization: Bearer $JOBS_TOKEN" -H "Content-Type: application/json" -d "$RES" >/dev/null
-              echo "b70 built + posted $ID"
+              echo "b35-cluster built + posted $ID"
             else
               sleep 20
             fi
