@@ -104,28 +104,39 @@ jobs:
             B4L_POWER=100 B4L_NEW_SETTINGS=1 \
             nohup nice -n 19 ./b4l_node --run > donor-head.log 2>&1 &
           sleep 10; echo "head idle-donor launched (b35c-head, honest v1.15.0):"; tail -6 donor-head.log 2>/dev/null || true
-      - name: Download the 80B MoE (multi-part GGUF) to the big disk (/mnt ~70 GB)
+      - name: Download the 30B MoE GGUF to the big disk (/mnt ~70 GB) — verified real, not an HTML error page
         run: |
           sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
-          REPO="${{ inputs.model_repo || 'unsloth/Qwen3-Coder-Next-GGUF' }}"
-          GLOB="${{ inputs.model_glob || 'Qwen3-Coder-Next-IQ4_XS' }}"
+          REPO="${{ inputs.model_repo || 'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF' }}"
+          GLOB="${{ inputs.model_glob || 'Qwen3-Coder-30B-A3B-Instruct-Q4_K_M' }}"
           N="${{ inputs.n_parts || '1' }}"
           BASE="https://huggingface.co/${REPO}/resolve/main/${GLOB}"
           BN=$(basename "${GLOB}")
+          # THE 09-02 BUG this guards: the repo GGUFs are PUBLIC, but sending -H "Authorization: Bearer <HF_TOKEN>"
+          # with an expired / non-xet token makes HF return a ~3KB HTML error page ('<!DOCTYPE html>'), which
+          # `curl -sL` (no -f) silently SAVES as the .gguf. llama-server then dies with "invalid magic '<!DO'",
+          # the poll loop's health-check fails, and the head exits having served nothing — 30 min wasted, run
+          # still "success". Fix: NO auth header (public file downloads fine unauthenticated — verified), `-f` so
+          # curl fails on an HTTP error instead of saving the body, and a magic+size ASSERT so a bad download
+          # fails LOUD here instead of masquerading as a healthy cluster.
+          dl() {  # dl <url> <outpath>
+            curl -fL --retry 8 --retry-delay 3 --retry-all-errors -o "$2" "$1"
+            local sz mag
+            sz=$(stat -c%s "$2" 2>/dev/null || echo 0); mag=$(head -c4 "$2" 2>/dev/null)
+            echo "  -> $2 : size=$sz magic=$mag"
+            if [ "$sz" -lt 1000000000 ] || [ "$mag" != "GGUF" ]; then
+              echo "::error::$2 is not a valid GGUF (size=$sz magic=$mag) — got an HTML/error page, not the model"; exit 1; fi
+          }
           if [ "$N" = "1" ]; then
             echo "single-file GGUF -> ${BN}.gguf"
-            curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
-                 -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-                 -o "/mnt/m/${BN}.gguf" "${BASE}.gguf"
+            dl "${BASE}.gguf" "/mnt/m/${BN}.gguf"
             echo "MODEL_FIRST=/mnt/m/${BN}.gguf" >> "$GITHUB_ENV"
           else
             NN=$(printf '%05d' "$N")
             for i in $(seq 1 "$N"); do
               II=$(printf '%05d' "$i")
               echo "downloading part $i/$N -> ${BN}-${II}-of-${NN}.gguf"
-              curl -sL --retry 8 --retry-delay 3 --retry-all-errors \
-                   -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
-                   -o "/mnt/m/${BN}-${II}-of-${NN}.gguf" "${BASE}-${II}-of-${NN}.gguf"
+              dl "${BASE}-${II}-of-${NN}.gguf" "/mnt/m/${BN}-${II}-of-${NN}.gguf"
             done
             echo "MODEL_FIRST=/mnt/m/${BN}-00001-of-${NN}.gguf" >> "$GITHUB_ENV"
           fi
