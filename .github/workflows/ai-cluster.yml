@@ -174,7 +174,11 @@ jobs:
           # no --tensor-split => auto-balance by each worker's reported free memory.
           "$SRV" --model "$MODEL_FIRST" \
                  --rpc "${{ steps.peers.outputs.rpc }}" --n-gpu-layers 99 \
-                 --ctx-size 2048 --batch-size 128 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
+                 --ctx-size 16384 --batch-size 128 --host 127.0.0.1 --port 8899 > head.log 2>&1 &
+          # ctx 2048 was FAR too small for a coder building a module+test envelope: prompt (contract +
+          # mem_pool recall) + response could not fit, so the model returned an EMPTY 200 ('b35-cluster empty',
+          # 5 of 14 builds, 20 wasted runs). 16384 gives ~10k prompt room + a 6k answer. Same empty-200 class
+          # laptop_helper fixed 3x on the gateway callers (open the budget so prompt+answer both fit). 2026-09-02
           echo "loading 70B across the cluster (can take several min)..."
           # 70B across 11 CPU-RPC workers is slow — wait up to ~25 min for health before giving up.
           for i in $(seq 1 300); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "READY"; break; }; sleep 5; done
@@ -183,7 +187,7 @@ jobs:
           # real serving step below and leave heavy builds unserved (the bug that stranded P2-*-v2).
           python3 - <<'PY' || echo "smoke test non-fatal (server still loading / transient) — serving continues"
           import json,urllib.request,time
-          def ask(p, mx=1500):
+          def ask(p, mx=6000):
               b=json.dumps({"messages":[{"role":"user","content":p}],"temperature":0.2,"max_tokens":mx}).encode()
               r=urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8899/v1/chat/completions",b,{"Content-Type":"application/json"}),timeout=3600)
               return json.loads(r.read())
@@ -218,7 +222,7 @@ jobs:
             ID=$(printf '%s' "$JOB" | jq -r '.id // empty' 2>/dev/null)
             if [ -n "$ID" ]; then
               PROMPT=$(printf '%s' "$JOB" | jq -r '.prompt')
-              REQ=$(jq -n --arg p "$PROMPT" '{messages:[{role:"user",content:$p}],temperature:0.2,max_tokens:1500}')
+              REQ=$(jq -n --arg p "$PROMPT" '{messages:[{role:"user",content:$p}],temperature:0.2,max_tokens:6000}')
               OUT=$(curl -s -m 3000 http://127.0.0.1:8899/v1/chat/completions -H "Content-Type: application/json" -d "$REQ" | jq -r '.choices[0].message.content // "b35-cluster empty"')
               RES=$(jq -n --arg id "$ID" --arg r "$OUT" '{id:$id,agent:"b35-cluster",result:$r,ok:true}')
               curl -s -m 60 https://compute.bull4life.com/jobs/result -H "Authorization: Bearer $JOBS_TOKEN" -H "Content-Type: application/json" -d "$RES" >/dev/null
