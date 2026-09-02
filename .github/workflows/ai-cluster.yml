@@ -45,7 +45,7 @@ jobs:
         uses: tailscale/github-action@v2
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
-          hostname: ai-worker-${{ matrix.idx }}
+          hostname: ai-worker-${{ github.run_id }}-${{ matrix.idx }}
       - name: Fetch llama.cpp (CPU build)
         run: |
           curl -fsSL "$LLAMACPP_URL" -o llama.tgz
@@ -146,10 +146,12 @@ jobs:
         run: |
           N=${{ inputs.n_workers || '4' }}
           # Discover worker IPs from `tailscale status --json` (reliable — name resolution via
-          # `tailscale ip <host>` was flaky). Match peers whose hostname starts with ai-worker-,
+          # `tailscale ip <host>` was flaky). Match peers whose hostname starts with ai-worker-<THIS run_id>-,
+          # (run-scoped: orphan ai-worker-* from cancelled/concurrent runs linger on the shared tailnet; matching
+          #  the bare prefix pooled 19 mismatched workers across runs and llama-server never got healthy 2026-09-02)
           # that are Online, then confirm the rpc port is open before adding to the pool.
           get_ips() {
-            tailscale status --json | jq -r '.Peer[] | select((.HostName|ascii_downcase|startswith("ai-worker-")) and .Online) | .TailscaleIPs[0]'
+            tailscale status --json | jq -r '.Peer[] | select((.HostName|ascii_downcase|startswith("ai-worker-${{ github.run_id }}-")) and .Online) | .TailscaleIPs[0]'
           }
           PEERS=""
           for t in $(seq 1 100); do
