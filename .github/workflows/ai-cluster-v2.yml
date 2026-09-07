@@ -223,14 +223,22 @@ jobs:
                   time.sleep(20); continue
               t0 = time.time(); jid = job['id']; prompt = job['prompt']
               print(f'CLAIMED {jid} -> {len(ips)} copies', flush=True)
+              # v2.1 (2026-09-07 11:55Z): a WALL-CLOCK deadline per round. In the first window one candidate call outlived its socket
+              # timeout, the orchestrator waited 2.5 h on task 2 and the rail's 40-min claim expired. Now a round ends at ROUND_S
+              # no matter what: unfinished candidates count as no-code, and the whole task stays under the claim TTL.
+              ROUND_S = int(os.environ.get('ROUND_S', '900')); MAXTOK = int(os.environ.get('MAXTOK', '4000'))
               cands = [None] * len(ips)
               def work(i, ip):
                   try:
-                      cands[i] = ask(ip, [{'role': 'user', 'content': prompt}], temp=0.2 if i == 0 else 0.5)
+                      cands[i] = ask(ip, [{'role': 'user', 'content': prompt}], temp=0.2 if i == 0 else 0.5, mx=MAXTOK, timeout=ROUND_S)
                   except Exception as e:
                       cands[i] = ''
-              th = [threading.Thread(target=work, args=(i, ip)) for i, ip in enumerate(ips)]
-              [t.start() for t in th]; [t.join() for t in th]
+              th = [threading.Thread(target=work, args=(i, ip), daemon=True) for i, ip in enumerate(ips)]
+              [t.start() for t in th]
+              t_end = time.time() + ROUND_S + 30
+              for t in th:
+                  t.join(max(1, t_end - time.time()))
+              cands = [c if c is not None else '' for c in cands]      # a candidate still running past the deadline = no answer
               grades = [grade(c) for c in cands]
               winner = next((i for i, g in enumerate(grades) if g['failed'] == 0 and g['passed'] > 0), None)
               repaired = False
@@ -244,11 +252,14 @@ jobs:
                               {'role': 'user', 'content': 'Your answer failed its tests. pytest output:\n' + g['out'][-1200:] +
                                '\nReturn the COMPLETE corrected answer in the SAME format (same JSON envelope or same python fence), nothing else.'}]
                       try:
-                          cands[i] = ask(ip, msgs, temp=0.2)
+                          cands[i] = ask(ip, msgs, temp=0.2, mx=MAXTOK, timeout=ROUND_S)
                       except Exception:
                           pass
-                  th = [threading.Thread(target=fix, args=(i, ip)) for i, ip in enumerate(ips)]
-                  [t.start() for t in th]; [t.join() for t in th]
+                  th = [threading.Thread(target=fix, args=(i, ip), daemon=True) for i, ip in enumerate(ips)]
+                  [t.start() for t in th]
+                  t_end = time.time() + ROUND_S + 30
+                  for t in th:
+                      t.join(max(1, t_end - time.time()))               # the repair round has the same hard deadline
                   grades = [grade(c) for c in cands]
                   winner = next((i for i, g in enumerate(grades) if g['failed'] == 0 and g['passed'] > 0), None)
               el = round((time.time() - t0) / 60, 1)
