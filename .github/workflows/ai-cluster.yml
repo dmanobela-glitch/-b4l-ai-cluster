@@ -28,7 +28,8 @@ on:
   # nearly free (30B compute is on the workers over RPC). The head serves heavy builds via the poll step ON TOP
   # of hunting. idle=productive; the fallback is REAL code now, not a promise.
   schedule:
-    - cron: '7 */6 * * *'
+    - cron: '7 */6 * * *'        # cluster a (00:07/06:07/12:07/18:07)
+    - cron: '37 3-23/6 * * *'     # cluster b, staggered 3 h (03:37/09:37/15:37/21:37) - Master 2026-09-07: 1-2 30B clusters on this account
 
 env:
   LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10701/llama-b10701-bin-ubuntu-x64.tar.gz"
@@ -36,6 +37,8 @@ env:
 
 jobs:
   worker:
+    env:
+      CLUSTER_TAG: "${{ inputs.cluster_tag || (github.event.schedule == '37 3-23/6 * * *' && 'b') || '' }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -66,7 +69,7 @@ jobs:
           # 30B-A3B tensor-load + inference never starve. Without this, a power-40 donor hogged CPU and STALLED the
           # head's 30B-A3B load across RPC (serving hung 25min, never healthy). The donor now uses only truly-idle CPU.
           B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL="${{ vars.B4L_EMAIL }}" \
-            B4L_NODE_ID=b35c${{ inputs.cluster_tag && format('-{0}', inputs.cluster_tag) || '' }}-worker-${{ matrix.idx }} B4L_NICKNAME="b35c worker ${{ matrix.idx }}" \
+            B4L_NODE_ID=b35c${{ env.CLUSTER_TAG && format('-{0}', env.CLUSTER_TAG) || '' }}-worker-${{ matrix.idx }} B4L_NICKNAME="b35c worker ${{ matrix.idx }}" \
             B4L_POWER=100 B4L_NEW_SETTINGS=1 \
             nohup bash -c 'end=$(( $(date +%s) + ${{ inputs.window_min || 330 }}*60 )); while [ "$(date +%s)" -lt "$end" ]; do timeout $(( end - $(date +%s) )) nice -n 19 ./b4l_node --run || true; sleep 2; done' > donor-w${{ matrix.idx }}.log 2>&1 &
           sleep 10; echo "worker ${{ matrix.idx }} idle-donor launched (b35c-worker-${{ matrix.idx }}, current fleet node):"
@@ -79,6 +82,8 @@ jobs:
           timeout ${{ inputs.window_min || '330' }}m "$BIN" -H "$TSIP" -p "$RPC_PORT" -t 4 || true
 
   head:
+    env:
+      CLUSTER_TAG: "${{ inputs.cluster_tag || (github.event.schedule == '37 3-23/6 * * *' && 'b') || '' }}"
     runs-on: ubuntu-latest
     steps:
       - name: Join tailnet
@@ -103,7 +108,7 @@ jobs:
           # nice -n 19 = LOWEST priority so llama-server (the 30B-A3B coordinator) always preempts the donor — the
           # head must never starve while pooling/serving the 30B-A3B. Donor uses only genuinely-idle head CPU.
           B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL="${{ vars.B4L_EMAIL }}" \
-            B4L_NODE_ID=b35c${{ inputs.cluster_tag && format('-{0}', inputs.cluster_tag) || '' }}-head B4L_NICKNAME="b35c head" \
+            B4L_NODE_ID=b35c${{ env.CLUSTER_TAG && format('-{0}', env.CLUSTER_TAG) || '' }}-head B4L_NICKNAME="b35c head" \
             B4L_POWER=100 B4L_NEW_SETTINGS=1 \
             nohup bash -c 'end=$(( $(date +%s) + ${{ inputs.window_min || 330 }}*60 )); while [ "$(date +%s)" -lt "$end" ]; do timeout $(( end - $(date +%s) )) nice -n 19 ./b4l_node --run || true; sleep 2; done' > donor-head.log 2>&1 &
           sleep 10; echo "head idle-donor launched (b35c-head, current fleet node):"; tail -6 donor-head.log 2>/dev/null || true
