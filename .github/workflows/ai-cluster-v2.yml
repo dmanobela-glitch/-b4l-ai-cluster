@@ -210,8 +210,10 @@ jobs:
               time.sleep(10)
           print('copies healthy:', len(ips), ips, flush=True)
           log = open('v2_results.jsonl', 'a'); n_done = 0
+          failed_ids = set()                 # window 3: tasks this agent already failed are never re-worked here
+          slow = {}                          # window 3: ip -> consecutive rounds with no candidate inside ROUND_S
           while time.time() < END:
-              ips = [ip for ip in ips if healthy(ip)] or [ip for ip in peers() if healthy(ip)]
+              ips = [ip for ip in ips if healthy(ip) and slow.get(ip, 0) < 2] or [ip for ip in peers() if healthy(ip) and slow.get(ip, 0) < 2]
               if not ips:
                   print('no healthy copies - waiting', flush=True); time.sleep(30); continue
               st, body = rail(f'/jobs/claim?agent={AGENT}&band=heavy')
@@ -222,6 +224,9 @@ jobs:
               if not job.get('id'):
                   time.sleep(20); continue
               t0 = time.time(); jid = job['id']; prompt = job['prompt']
+              if jid in failed_ids:          # window 3: the rail re-queued a task we already failed - hand it back, do not burn a round
+                  rail('/jobs/result', {'id': jid, 'agent': AGENT, 'ok': False, 'result': 'v2 cluster: skip-repeat (this agent already failed this id)'})
+                  print(f'SKIP-REPEAT {jid}', flush=True); time.sleep(5); continue
               print(f'CLAIMED {jid} -> {len(ips)} copies', flush=True)
               # v2.1 (2026-09-07 11:55Z): a WALL-CLOCK deadline per round. In the first window one candidate call outlived its socket
               # timeout, the orchestrator waited 2.5 h on task 2 and the rail's 40-min claim expired. Now a round ends at ROUND_S
@@ -238,11 +243,15 @@ jobs:
               t_end = time.time() + ROUND_S + 30
               for t in th:
                   t.join(max(1, t_end - time.time()))
+              for i, ip in enumerate(ips):   # window 3: a copy that answers nothing inside ROUND_S twice in a row leaves the fan-out
+                  slow[ip] = 0 if cands[i] else slow.get(ip, 0) + 1
               cands = [c if c is not None else '' for c in cands]      # a candidate still running past the deadline = no answer
               grades = [grade(c) for c in cands]
               winner = next((i for i, g in enumerate(grades) if g['failed'] == 0 and g['passed'] > 0), None)
               repaired = False
-              if winner is None:
+              for _rep in range(2):          # window 3: TWO repair rounds (the registered rule for this window), same hard deadline each
+                  if winner is not None:
+                      break
                   repaired = True
                   def fix(i, ip):
                       g = grades[i]
@@ -263,12 +272,14 @@ jobs:
                   grades = [grade(c) for c in cands]
                   winner = next((i for i, g in enumerate(grades) if g['failed'] == 0 and g['passed'] > 0), None)
               el = round((time.time() - t0) / 60, 1)
+              if winner is None:
+                  failed_ids.add(jid)
               if winner is not None:
                   rail('/jobs/result', {'id': jid, 'agent': AGENT, 'result': cands[winner], 'ok': True}); verdict = 'PASS'
               else:
                   best = max(range(len(grades)), key=lambda i: (grades[i]['passed'], -grades[i]['failed']))
                   rail('/jobs/result', {'id': jid, 'agent': AGENT, 'ok': False,
-                                        'result': f'v2 cluster: 0/{len(ips)} candidates passed their own tests after one repair round (best {grades[best]["passed"]} passed / {grades[best]["failed"]} failed). Broken code not posted.'})
+                                        'result': f'v2 cluster: 0/{len(ips)} candidates passed their own tests after two repair rounds (best {grades[best]["passed"]} passed / {grades[best]["failed"]} failed). Broken code not posted.'})
                   verdict = 'FAIL'
               rec = dict(id=jid, verdict=verdict, minutes=el, copies=len(ips), repair=repaired,
                          grades=[{k: g[k] for k in ('kind', 'passed', 'failed')} for g in grades])
