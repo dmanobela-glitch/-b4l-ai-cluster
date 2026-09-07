@@ -19,6 +19,7 @@ on:
       model_glob:  { description: "GGUF file/prefix. Qwen3-Coder-30B-A3B = CODER-tuned MoE, 3B ACTIVE (fast on CPU), coder-specialized (no generalist bloat). Q4_K_M ~18.6GB SINGLE file — pooled across 4 workers = ~4.7GB/shard, comfortable on 16GB runners. This is the b35-cluster coder.", default: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M", required: true }
       n_parts:     { description: "GGUF split count (1 = single file)", default: "1", required: true }
       n_workers:   { description: "worker nodes (must match the matrix). 30B-A3B is a MoE: 30B TOTAL (needs pooled RAM) but only 3B ACTIVE/token (fast on CPU). 4 workers give pooled RAM to HOLD it + each idle-hunts; more workers != faster inference (pipeline is sequential hops), the 3B-active is what makes it fast. FEWER hops than the old 16 = robust.", default: "4", required: true }
+      cluster_tag: { description: "second cluster on demand: node-id suffix, e.g. b (empty = the scheduled cluster)", default: "", required: false }
       window_min:  { description: "cluster alive window (min) — must exceed head 30B download(~18GB)+load", default: "330", required: false }
   # 24/7 SELF-SPIN (Master 2026-08-29): run every 6h for a ~5.5h window = near-continuous. NO waste, NO harm —
   # EVERY runner (head + 4 workers) runs the honest node in the BACKGROUND the whole window (see the "Idle-donor"
@@ -52,28 +53,29 @@ jobs:
           mkdir -p llama && tar -xzf llama.tgz -C llama
           find llama -type f -name 'ggml-rpc-server' -exec chmod +x {} \;
       - name: Idle-donor — this worker donates spare CPU to the grid for the WHOLE window (no waste)
-        # A worker only HOLDS a 70B shard in RAM; its CPU sits idle between builds. Run the honest v1.15.0
+        # A worker only HOLDS a 30B-A3B shard in RAM; its CPU sits idle between builds. Run the current fleet node
         # node binary in the background (nohup => survives into the rpc-server step, lives the whole job) so
         # every b70 runner hunts/optimizes the entire window. Best-effort: a download miss never blocks the
         # rpc role. Unique node_id per worker so each registers separately on the coordinator.
         run: |
-          curl -fsSL --retry 5 --retry-all-errors -o b4l_node \
-            "https://compute.bull4life.com/release/b4l_node-1.18.0.exe" \
-            && chmod +x b4l_node || { echo "donor dl failed — skipping (rpc role unaffected)"; exit 0; }
+          # CURRENT fleet release, resolved from the coordinator (a stale pin = below the version floor = the donor
+          # self-updates, exits, and dies with no supervisor: the 1.18.0 pin killed every cluster donor until 2026-09-07).
+          URL=$(curl -fsSL -m 20 https://compute.bull4life.com/version | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])' 2>/dev/null || true)
+          curl -fsSL --retry 5 --retry-all-errors -o b4l_node "${URL:-https://compute.bull4life.com/release/b4l_node-1.20.0.exe}" \n            && chmod +x b4l_node || { echo "donor dl failed - skipping (rpc role unaffected)"; exit 0; }
           # nice -n 19 = LOWEST priority: the rpc-server (normal priority) ALWAYS preempts the donor, so the
-          # 70B tensor-load + inference never starve. Without this, a power-40 donor hogged CPU and STALLED the
-          # head's 70B load across RPC (serving hung 25min, never healthy). The donor now uses only truly-idle CPU.
-          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
-            B4L_NODE_ID=b35c-worker-${{ matrix.idx }} B4L_NICKNAME="b35c worker ${{ matrix.idx }}" \
+          # 30B-A3B tensor-load + inference never starve. Without this, a power-40 donor hogged CPU and STALLED the
+          # head's 30B-A3B load across RPC (serving hung 25min, never healthy). The donor now uses only truly-idle CPU.
+          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL="${{ vars.B4L_EMAIL }}" \
+            B4L_NODE_ID=b35c${{ inputs.cluster_tag && format('-{0}', inputs.cluster_tag) || '' }}-worker-${{ matrix.idx }} B4L_NICKNAME="b35c worker ${{ matrix.idx }}" \
             B4L_POWER=100 B4L_NEW_SETTINGS=1 \
-            nohup nice -n 19 ./b4l_node --run > donor-w${{ matrix.idx }}.log 2>&1 &
-          sleep 10; echo "worker ${{ matrix.idx }} idle-donor launched (b35c-worker-${{ matrix.idx }}, honest v1.15.0):"
+            nohup bash -c 'end=$(( $(date +%s) + ${{ inputs.window_min || 330 }}*60 )); while [ "$(date +%s)" -lt "$end" ]; do timeout $(( end - $(date +%s) )) nice -n 19 ./b4l_node --run || true; sleep 2; done' > donor-w${{ matrix.idx }}.log 2>&1 &
+          sleep 10; echo "worker ${{ matrix.idx }} idle-donor launched (b35c-worker-${{ matrix.idx }}, current fleet node):"
           tail -6 donor-w${{ matrix.idx }}.log 2>/dev/null || true
       - name: Run rpc-server on the tailnet IP for the whole window
         run: |
           BIN=$(find llama -name ggml-rpc-server -type f | head -1)
           TSIP=$(tailscale ip -4 | head -1)
-          echo "worker ${{ matrix.idx }}: rpc-server @ $TSIP:$RPC_PORT (holds a 70B shard)"
+          echo "worker ${{ matrix.idx }}: rpc-server @ $TSIP:$RPC_PORT (holds a 30B-A3B shard)"
           timeout ${{ inputs.window_min || '330' }}m "$BIN" -H "$TSIP" -p "$RPC_PORT" -t 4 || true
 
   head:
@@ -90,20 +92,21 @@ jobs:
           mkdir -p llama && tar -xzf llama.tgz -C llama
           find llama -type f -name 'llama-*' -exec chmod +x {} \;
       - name: Idle-donor — the head donates spare CPU to the grid for the WHOLE window (no waste)
-        # The head's own CPU is nearly free: the 70B compute is offloaded to the workers over RPC, the head
-        # only coordinates. So it runs the honest v1.15.0 node in the background the whole window and hunts
+        # The head's own CPU is nearly free: the 30B-A3B compute is offloaded to the workers over RPC, the head
+        # only coordinates. So it runs the current fleet node node in the background the whole window and hunts
         # continuously, while the poll step serves heavy builds on top. Best-effort; never blocks serving.
         run: |
-          curl -fsSL --retry 5 --retry-all-errors -o b4l_node \
-            "https://compute.bull4life.com/release/b4l_node-1.18.0.exe" \
-            && chmod +x b4l_node || { echo "donor dl failed — skipping (head serving unaffected)"; exit 0; }
-          # nice -n 19 = LOWEST priority so llama-server (the 70B coordinator) always preempts the donor — the
-          # head must never starve while pooling/serving the 70B. Donor uses only genuinely-idle head CPU.
-          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL=dmanobela@gmail.com \
-            B4L_NODE_ID=b35c-head B4L_NICKNAME="b35c head" \
+          # CURRENT fleet release, resolved from the coordinator (a stale pin = below the version floor = the donor
+          # self-updates, exits, and dies with no supervisor: the 1.18.0 pin killed every cluster donor until 2026-09-07).
+          URL=$(curl -fsSL -m 20 https://compute.bull4life.com/version | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])' 2>/dev/null || true)
+          curl -fsSL --retry 5 --retry-all-errors -o b4l_node "${URL:-https://compute.bull4life.com/release/b4l_node-1.20.0.exe}" \n            && chmod +x b4l_node || { echo "donor dl failed - skipping (rpc role unaffected)"; exit 0; }
+          # nice -n 19 = LOWEST priority so llama-server (the 30B-A3B coordinator) always preempts the donor — the
+          # head must never starve while pooling/serving the 30B-A3B. Donor uses only genuinely-idle head CPU.
+          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL="${{ vars.B4L_EMAIL }}" \
+            B4L_NODE_ID=b35c${{ inputs.cluster_tag && format('-{0}', inputs.cluster_tag) || '' }}-head B4L_NICKNAME="b35c head" \
             B4L_POWER=100 B4L_NEW_SETTINGS=1 \
-            nohup nice -n 19 ./b4l_node --run > donor-head.log 2>&1 &
-          sleep 10; echo "head idle-donor launched (b35c-head, honest v1.15.0):"; tail -6 donor-head.log 2>/dev/null || true
+            nohup bash -c 'end=$(( $(date +%s) + ${{ inputs.window_min || 330 }}*60 )); while [ "$(date +%s)" -lt "$end" ]; do timeout $(( end - $(date +%s) )) nice -n 19 ./b4l_node --run || true; sleep 2; done' > donor-head.log 2>&1 &
+          sleep 10; echo "head idle-donor launched (b35c-head, current fleet node):"; tail -6 donor-head.log 2>/dev/null || true
       - name: Download the 30B MoE GGUF to the big disk (/mnt ~70 GB) — verified real, not an HTML error page
         run: |
           sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
@@ -167,7 +170,7 @@ jobs:
           [ -z "$PEERS" ] && { echo "::error::no workers reachable on the tailnet"; tailscale status || true; exit 1; }
           echo "rpc=$PEERS" >> "$GITHUB_OUTPUT"
           echo "final peers: $PEERS"
-      - name: Pool the 70B across the workers + run the v2 test
+      - name: Pool the 30B-A3B across the workers + run the v2 test
         run: |
           SRV=$(find llama -name 'llama-server' -type f | head -1)
           # --n-gpu-layers 99 pushes ALL layers onto the RPC devices (they are offload targets);
@@ -179,7 +182,7 @@ jobs:
           # mem_pool recall) + response could not fit, so the model returned an EMPTY 200 ('b35-cluster empty',
           # 5 of 14 builds, 20 wasted runs). 16384 gives ~10k prompt room + a 6k answer. Same empty-200 class
           # laptop_helper fixed 3x on the gateway callers (open the budget so prompt+answer both fit). 2026-09-02
-          echo "loading 70B across the cluster (can take several min)..."
+          echo "loading 30B-A3B across the cluster (can take several min)..."
           # 70B across 11 CPU-RPC workers is slow — wait up to ~25 min for health before giving up.
           for i in $(seq 1 300); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "READY"; break; }; sleep 5; done
           curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || echo "::warning::70B not healthy yet — smoke test may fail, but the serving step runs anyway (if:always)"
@@ -198,9 +201,9 @@ jobs:
           m=d["choices"][0]["message"]; u=d.get("usage",{})
           out=m.get("content") or m.get("reasoning_content") or ""
           dt=time.time()-t; tk=u.get("completion_tokens",0)
-          print("=== 70B POOLED-CLUSTER OUTPUT (coherent = it works, not junk) ===")
+          print("=== 30B-A3B POOLED-CLUSTER OUTPUT (coherent = it works, not junk) ===")
           print(out[:1800])
-          print(f"\n=== {tk} tokens in {dt:.0f}s = {tk/max(dt,1):.2f} tok/s across the 6-node cluster ===")
+          print(f"\n=== {tk} tokens in {dt:.0f}s = {tk/max(dt,1):.2f} tok/s across the 5-node cluster ===")
           PY
       - name: Poll the jobs queue + build heavy tasks on the pooled 70B (PULL model, for the window)
         # if: always() — the smoke-test step above is best-effort; serving must run whenever llama-server is
