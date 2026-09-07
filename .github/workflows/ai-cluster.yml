@@ -27,8 +27,8 @@ on:
   # produces diamonds instead of sitting: a shard-holding worker's CPU is otherwise idle, and the head's CPU is
   # nearly free (30B compute is on the workers over RPC). The head serves heavy builds via the poll step ON TOP
   # of hunting. idle=productive; the fallback is REAL code now, not a promise.
-  schedule:
-    - cron: '7 */6 * * *'        # ONE standing cluster (Master 2026-09-07: measured 1 of 6 builds correct -> the second cluster's 5 runners hunt instead)
+  # NO schedule (Master 2026-09-07, measured twice: 1 of 6 real builds pass their own test; a controlled difficulty-8 probe passed
+  # 1 of 6 tests and reported 11 false problems on real data) -> the runners hunt/optimize instead. Coder ON DEMAND only: `gh workflow run`.
 
 env:
   LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10701/llama-b10701-bin-ubuntu-x64.tar.gz"
