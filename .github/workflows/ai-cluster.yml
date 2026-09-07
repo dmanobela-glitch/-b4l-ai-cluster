@@ -28,8 +28,7 @@ on:
   # nearly free (30B compute is on the workers over RPC). The head serves heavy builds via the poll step ON TOP
   # of hunting. idle=productive; the fallback is REAL code now, not a promise.
   schedule:
-    - cron: '7 */6 * * *'        # cluster a (00:07/06:07/12:07/18:07)
-    - cron: '37 3-23/6 * * *'     # cluster b, staggered 3 h (03:37/09:37/15:37/21:37) - Master 2026-09-07: 1-2 30B clusters on this account
+    - cron: '7 */6 * * *'        # ONE standing cluster (Master 2026-09-07: measured 1 of 6 builds correct -> the second cluster's 5 runners hunt instead)
 
 env:
   LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10701/llama-b10701-bin-ubuntu-x64.tar.gz"
@@ -38,7 +37,7 @@ env:
 jobs:
   worker:
     env:
-      CLUSTER_TAG: "${{ inputs.cluster_tag || (github.event.schedule == '37 3-23/6 * * *' && 'b') || '' }}"
+      CLUSTER_TAG: "${{ inputs.cluster_tag || '' }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -83,7 +82,7 @@ jobs:
 
   head:
     env:
-      CLUSTER_TAG: "${{ inputs.cluster_tag || (github.event.schedule == '37 3-23/6 * * *' && 'b') || '' }}"
+      CLUSTER_TAG: "${{ inputs.cluster_tag || '' }}"
     runs-on: ubuntu-latest
     steps:
       - name: Join tailnet
