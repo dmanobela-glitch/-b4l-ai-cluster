@@ -1,0 +1,294 @@
+# B4L AI Cluster v2 — the EXPERIMENT (engine, 2026-09-07): can the 30B-A3B coder FINISH tasks if we change the METHOD?
+#
+# v1 (ai-cluster.yml) pooled ONE model over 4 rpc workers and answered every task ONCE, blind. Measured 2026-09-07 by
+# running each result's own tests: 1 of 6 real builds correct; a controlled probe passed 1 of 6 tests. Context (16k)
+# and RAM were never the limit - it does not see its failures.
+#
+# v2 = 12 runners as SIX INDEPENDENT copies (2 runners each: a rpc worker holds half the layers, the copy runner the
+# other half + the KV cache) and copy 1 orchestrates:
+#   claim a heavy job -> fan the prompt to every healthy copy in parallel (6 candidates) -> grade every candidate by
+#   ITS OWN tests in a sandbox (envelope module_code/test_code or a python fence with test_ functions) -> first
+#   passing candidate is posted -> otherwise ONE repair round per candidate with its pytest output -> otherwise a clean
+#   ok:false the rail re-queues (never post broken code). Every task is logged to v2_results.jsonl (artifact).
+# Pre-registered in studies/CLUSTER_V2_PREREG.md: baseline 1/6; the cluster earns 12 runners only if v2 >= 50 %.
+# Dispatch-only. Secrets: TS_AUTHKEY  HF_TOKEN(unused)  JOBS_TOKEN. Var: B4L_EMAIL.
+name: b4l-ai-cluster-v2
+on:
+  workflow_dispatch:
+    inputs:
+      model_repo:  { description: "HF repo (GGUF)", default: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", required: true }
+      model_glob:  { description: "GGUF file prefix", default: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M", required: true }
+      window_min:  { description: "window (min)", default: "330", required: false }
+      min_copies:  { description: "orchestrator waits for at least this many healthy copies", default: "4", required: false }
+      rpc_layers:  { description: "layers offloaded to the paired rpc worker (model has 48)", default: "24", required: false }
+
+permissions:
+  actions: write
+  contents: read
+
+env:
+  LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10701/llama-b10701-bin-ubuntu-x64.tar.gz"
+  RPC_PORT: "50052"
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: [1, 2, 3, 4, 5, 6]
+    steps:
+      - name: Join tailnet
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: aiv2-w-${{ github.run_id }}-${{ matrix.copy }}
+      - name: Fetch llama.cpp (CPU build)
+        run: |
+          curl -fsSL "$LLAMACPP_URL" -o llama.tgz
+          mkdir -p llama && tar -xzf llama.tgz -C llama
+          find llama -type f -name 'ggml-rpc-server' -exec chmod +x {} \;
+      - name: Idle-donor (hunts at nice 19 for the whole window on the CURRENT fleet release)
+        run: |
+          URL=$(curl -fsSL -m 20 https://compute.bull4life.com/version | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])' 2>/dev/null || true)
+          curl -fsSL --retry 5 --retry-all-errors -o b4l_node "${URL:-https://compute.bull4life.com/release/b4l_node-1.20.0.exe}" \
+            && chmod +x b4l_node || { echo "donor dl failed - skipping (rpc role unaffected)"; exit 0; }
+          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL="${{ vars.B4L_EMAIL }}" \
+            B4L_NODE_ID=b35v2-w${{ matrix.copy }} B4L_NICKNAME="b35v2 worker ${{ matrix.copy }}" \
+            B4L_POWER=100 B4L_NEW_SETTINGS=1 \
+            nohup bash -c 'end=$(( $(date +%s) + ${{ inputs.window_min || 330 }}*60 )); while [ "$(date +%s)" -lt "$end" ]; do timeout $(( end - $(date +%s) )) nice -n 19 ./b4l_node --run || true; sleep 2; done' > donor-w${{ matrix.copy }}.log 2>&1 &
+          sleep 10; echo "worker ${{ matrix.copy }} idle-donor launched:"; tail -4 donor-w${{ matrix.copy }}.log 2>/dev/null || true
+      - name: Run rpc-server on the tailnet IP for the whole window
+        run: |
+          BIN=$(find llama -name ggml-rpc-server -type f | head -1)
+          TSIP=$(tailscale ip -4 | head -1)
+          echo "worker ${{ matrix.copy }}: rpc-server @ $TSIP:$RPC_PORT (half of copy ${{ matrix.copy }})"
+          timeout ${{ inputs.window_min || '330' }}m "$BIN" -H "$TSIP" -p "$RPC_PORT" -t 4 || true
+
+  copy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: [1, 2, 3, 4, 5, 6]
+    steps:
+      - name: Join tailnet
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: aiv2-c-${{ github.run_id }}-${{ matrix.copy }}
+      - name: Fetch llama.cpp
+        run: |
+          curl -fsSL "$LLAMACPP_URL" -o llama.tgz
+          mkdir -p llama && tar -xzf llama.tgz -C llama
+          find llama -type f -name 'llama-*' -exec chmod +x {} \;
+      - name: Idle-donor (hunts at nice 19 for the whole window on the CURRENT fleet release)
+        run: |
+          URL=$(curl -fsSL -m 20 https://compute.bull4life.com/version | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])' 2>/dev/null || true)
+          curl -fsSL --retry 5 --retry-all-errors -o b4l_node "${URL:-https://compute.bull4life.com/release/b4l_node-1.20.0.exe}" \
+            && chmod +x b4l_node || { echo "donor dl failed - skipping"; exit 0; }
+          B4L_COORDINATOR=https://compute.bull4life.com B4L_EMAIL="${{ vars.B4L_EMAIL }}" \
+            B4L_NODE_ID=b35v2-c${{ matrix.copy }} B4L_NICKNAME="b35v2 copy ${{ matrix.copy }}" \
+            B4L_POWER=100 B4L_NEW_SETTINGS=1 \
+            nohup bash -c 'end=$(( $(date +%s) + ${{ inputs.window_min || 330 }}*60 )); while [ "$(date +%s)" -lt "$end" ]; do timeout $(( end - $(date +%s) )) nice -n 19 ./b4l_node --run || true; sleep 2; done' > donor-c${{ matrix.copy }}.log 2>&1 &
+          sleep 5
+      - name: "Download the 30B-A3B GGUF (verified real - size + magic)"
+        run: |
+          sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
+          REPO="${{ inputs.model_repo || 'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF' }}"
+          GLOB="${{ inputs.model_glob || 'Qwen3-Coder-30B-A3B-Instruct-Q4_K_M' }}"
+          curl -fL --retry 8 --retry-delay 3 --retry-all-errors -o "/mnt/m/model.gguf" "https://huggingface.co/${REPO}/resolve/main/${GLOB}.gguf"
+          sz=$(stat -c%s /mnt/m/model.gguf); mag=$(head -c4 /mnt/m/model.gguf)
+          echo "model: size=$sz magic=$mag"
+          if [ "$sz" -lt 1000000000 ] || [ "$mag" != "GGUF" ]; then echo "::error::not a GGUF"; exit 1; fi
+      - name: Wait for MY rpc worker (same copy index), then serve on the tailnet
+        run: |
+          WANT="aiv2-w-${{ github.run_id }}-${{ matrix.copy }}"
+          WIP=""
+          for t in $(seq 1 120); do
+            WIP=$(tailscale status --json | jq -r --arg h "$WANT" '.Peer[] | select((.HostName|ascii_downcase)==($h|ascii_downcase) and .Online) | .TailscaleIPs[0]' | head -1)
+            [ -n "$WIP" ] && nc -z -w3 "$WIP" "$RPC_PORT" 2>/dev/null && break
+            WIP=""; sleep 5
+          done
+          [ -z "$WIP" ] && { echo "::error::my rpc worker never came up"; exit 1; }
+          SRV=$(find llama -name 'llama-server' -type f | head -1)
+          TSIP=$(tailscale ip -4 | head -1)
+          "$SRV" --model /mnt/m/model.gguf --rpc "$WIP:$RPC_PORT" --n-gpu-layers ${{ inputs.rpc_layers || 24 }} \
+                 --ctx-size 16384 --batch-size 128 --host 0.0.0.0 --port 8899 > head.log 2>&1 &
+          echo "copy ${{ matrix.copy }}: loading (worker $WIP, serving on $TSIP:8899)"
+          for i in $(seq 1 300); do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 && { echo "READY"; break; }; sleep 5; done
+          curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "::error::copy ${{ matrix.copy }} never became healthy"; tail -30 head.log; exit 1; }
+      - name: Sandbox deps (the exec-stage envelopes declare numpy/pandas/river/ruptures)
+        if: ${{ matrix.copy == 1 }}
+        run: pip install -q numpy pandas scipy scikit-learn river ruptures pytest pytest-timeout 2>&1 | tail -2
+      - name: ORCHESTRATE — claim, fan-out, grade by own tests, repair once, post only passing (copy 1)
+        if: ${{ matrix.copy == 1 }}
+        env:
+          JOBS_TOKEN: ${{ secrets.JOBS_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          WINDOW_MIN: ${{ inputs.window_min || '330' }}
+          MIN_COPIES: ${{ inputs.min_copies || '4' }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys, time, subprocess, tempfile, threading, urllib.request
+          TOKEN = os.environ['JOBS_TOKEN']; RUN = os.environ['RUN_ID']
+          END = time.time() + int(os.environ.get('WINDOW_MIN', '330')) * 60 - 25 * 60
+          RAIL = 'https://compute.bull4life.com'; AGENT = 'b35-cluster-v2'
+
+          def peers():
+              out = subprocess.run(['tailscale', 'status', '--json'], capture_output=True, text=True).stdout
+              d = json.loads(out or '{}'); ips = ['127.0.0.1']
+              for p in (d.get('Peer') or {}).values():
+                  hn = (p.get('HostName') or '').lower()
+                  if hn.startswith(f'aiv2-c-{RUN}-') and p.get('Online') and p.get('TailscaleIPs'):
+                      ips.append(p['TailscaleIPs'][0])
+              return ips
+
+          def healthy(ip):
+              try:
+                  urllib.request.urlopen(f'http://{ip}:8899/health', timeout=5); return True
+              except Exception:
+                  return False
+
+          def ask(ip, messages, temp=0.3, mx=6000, timeout=2700):
+              b = json.dumps({'messages': messages, 'temperature': temp, 'max_tokens': mx}).encode()
+              r = urllib.request.urlopen(urllib.request.Request(f'http://{ip}:8899/v1/chat/completions', b, {'Content-Type': 'application/json'}), timeout=timeout)
+              m = json.loads(r.read())['choices'][0]['message']
+              return m.get('content') or m.get('reasoning_content') or ''
+
+          def rail(path, body=None):
+              req = urllib.request.Request(RAIL + path, data=json.dumps(body).encode() if body is not None else None,
+                                           headers={'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'})
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      return r.status, r.read().decode()
+              except urllib.error.HTTPError as e:
+                  return e.code, ''
+              except Exception:
+                  return 0, ''
+
+          def grade(text):
+              body = re.sub(r'<think>.*?</think>', '', text or '', flags=re.S)
+              d = tempfile.mkdtemp(prefix='v2g_'); env = None
+              m = re.search(r'\{.*"module_code".*\}', body, flags=re.S)
+              if m:
+                  try:
+                      env = json.loads(m.group(0))
+                  except Exception:
+                      env = None
+              if env and env.get('module_code') and env.get('test_code'):
+                  mf = os.path.basename(env.get('module_filename') or 'module.py'); tf = os.path.basename(env.get('test_filename') or 'test_module.py')
+                  open(os.path.join(d, mf), 'w').write(env['module_code']); open(os.path.join(d, tf), 'w').write(env['test_code'])
+                  target, kind = tf, 'envelope'
+              else:
+                  f = re.search(r'```python\s*\n(.*?)```', body, flags=re.S)
+                  if not f:
+                      return dict(kind='nocode', passed=0, failed=1, out='no code in the answer')
+                  open(os.path.join(d, 'module.py'), 'w').write(f.group(1)); kind = 'fence'
+                  if not re.search(r'^def test_', f.group(1), flags=re.M):
+                      r = subprocess.run([sys.executable, '-m', 'py_compile', 'module.py'], cwd=d, capture_output=True, text=True)
+                      return dict(kind='fence-notests', passed=int(r.returncode == 0), failed=int(r.returncode != 0), out=r.stderr[-600:])
+                  target = 'module.py'
+              try:
+                  r = subprocess.run([sys.executable, '-m', 'pytest', '-q', '--timeout=120', target], cwd=d, capture_output=True, text=True, timeout=400)
+              except subprocess.TimeoutExpired:
+                  return dict(kind=kind, passed=0, failed=1, out='pytest timed out')
+              o = r.stdout + r.stderr
+              pm = re.search(r'(\d+) passed', o); fm = re.search(r'(\d+) failed', o); em = re.search(r'(\d+) error', o)
+              p = int(pm.group(1)) if pm else 0; fl = (int(fm.group(1)) if fm else 0) + (int(em.group(1)) if em else 0)
+              if not (pm or fm or em):
+                  fl = 1
+              return dict(kind=kind, passed=p, failed=fl, out=o[-1500:])
+
+          ips = []
+          for i in range(150):
+              ips = [ip for ip in peers() if healthy(ip)]
+              if len(ips) >= int(os.environ.get('MIN_COPIES', '4')):
+                  break
+              time.sleep(10)
+          print('copies healthy:', len(ips), ips, flush=True)
+          log = open('v2_results.jsonl', 'a'); n_done = 0
+          while time.time() < END:
+              ips = [ip for ip in ips if healthy(ip)] or [ip for ip in peers() if healthy(ip)]
+              if not ips:
+                  print('no healthy copies - waiting', flush=True); time.sleep(30); continue
+              st, body = rail(f'/jobs/claim?agent={AGENT}&band=heavy')
+              try:
+                  job = json.loads(body) if body.strip() else {}
+              except Exception:
+                  job = {}
+              if not job.get('id'):
+                  time.sleep(20); continue
+              t0 = time.time(); jid = job['id']; prompt = job['prompt']
+              print(f'CLAIMED {jid} -> {len(ips)} copies', flush=True)
+              cands = [None] * len(ips)
+              def work(i, ip):
+                  try:
+                      cands[i] = ask(ip, [{'role': 'user', 'content': prompt}], temp=0.2 if i == 0 else 0.5)
+                  except Exception as e:
+                      cands[i] = ''
+              th = [threading.Thread(target=work, args=(i, ip)) for i, ip in enumerate(ips)]
+              [t.start() for t in th]; [t.join() for t in th]
+              grades = [grade(c) for c in cands]
+              winner = next((i for i, g in enumerate(grades) if g['failed'] == 0 and g['passed'] > 0), None)
+              repaired = False
+              if winner is None:
+                  repaired = True
+                  def fix(i, ip):
+                      g = grades[i]
+                      if not cands[i] or g['kind'] == 'nocode':
+                          return
+                      msgs = [{'role': 'user', 'content': prompt}, {'role': 'assistant', 'content': cands[i]},
+                              {'role': 'user', 'content': 'Your answer failed its tests. pytest output:\n' + g['out'][-1200:] +
+                               '\nReturn the COMPLETE corrected answer in the SAME format (same JSON envelope or same python fence), nothing else.'}]
+                      try:
+                          cands[i] = ask(ip, msgs, temp=0.2)
+                      except Exception:
+                          pass
+                  th = [threading.Thread(target=fix, args=(i, ip)) for i, ip in enumerate(ips)]
+                  [t.start() for t in th]; [t.join() for t in th]
+                  grades = [grade(c) for c in cands]
+                  winner = next((i for i, g in enumerate(grades) if g['failed'] == 0 and g['passed'] > 0), None)
+              el = round((time.time() - t0) / 60, 1)
+              if winner is not None:
+                  rail('/jobs/result', {'id': jid, 'agent': AGENT, 'result': cands[winner], 'ok': True}); verdict = 'PASS'
+              else:
+                  best = max(range(len(grades)), key=lambda i: (grades[i]['passed'], -grades[i]['failed']))
+                  rail('/jobs/result', {'id': jid, 'agent': AGENT, 'ok': False,
+                                        'result': f'v2 cluster: 0/{len(ips)} candidates passed their own tests after one repair round (best {grades[best]["passed"]} passed / {grades[best]["failed"]} failed). Broken code not posted.'})
+                  verdict = 'FAIL'
+              rec = dict(id=jid, verdict=verdict, minutes=el, copies=len(ips), repair=repaired,
+                         grades=[{k: g[k] for k in ('kind', 'passed', 'failed')} for g in grades])
+              n_done += 1
+              print('V2', json.dumps(rec), flush=True); log.write(json.dumps(rec) + '\n'); log.flush()
+          print(f'window over: {n_done} tasks', flush=True)
+          PY
+      - name: Keep serving until the window ends (copies 2-6)
+        if: ${{ matrix.copy != 1 }}
+        run: |
+          END=$(( $(date +%s) + (${{ inputs.window_min || 330 }} - 25)*60 ))
+          while [ "$(date +%s)" -lt "$END" ]; do curl -sf http://127.0.0.1:8899/health >/dev/null 2>&1 || { echo "server died"; break; }; sleep 60; done
+      - name: Upload the v2 result log
+        if: ${{ always() && matrix.copy == 1 }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2_results
+          path: v2_results.jsonl
+          if-no-files-found: ignore
+      - name: Head log tail
+        if: always()
+        run: tail -30 head.log 2>/dev/null || true
+
+  respawn_hunters:
+    # the experiment borrows the second account's slots from the grid hunters; give them back when it ends
+    needs: [copy, worker]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch the grid hunters again
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run donate.yml --ref "${{ github.ref_name }}" -R "${{ github.repository }}" && echo "hunters re-dispatched" || echo "::warning::hunter dispatch failed - the cron fallback picks it up"
