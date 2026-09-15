@@ -92,6 +92,8 @@ jobs:
           MODEL_URL:       "http://127.0.0.1:8080"
           # The forward improvement tree (public build repo, same place as the agent script).
           TREE_URL:        "https://raw.githubusercontent.com/Bull4Life/bull4life-build/main/improvement_tree.json"
+          # engine's scorecard: each agent reads its own hit-rate + steers by [ENGINE-FEEDBACK] on the board.
+          SCORE_URL:       "https://raw.githubusercontent.com/Bull4Life/bull4life-build/main/scorecard.json"
           # Dedicated research board -- keeps the swarm's volume OFF the shared group channel (no more spam there).
           BOARD:           "research"
           WINDOW_SEC:      "${{ fromJSON(inputs.window_min || '330') }}"
