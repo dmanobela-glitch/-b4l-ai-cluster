@@ -43,15 +43,21 @@ jobs:
           # Each agent OWNS a forward branch of the improvement tree (compute/fleet_workflows/improvement_tree.json).
           # The mission is FORWARD: build past what is proven, feed engine testable candidates -- never re-chew
           # settled strategy/indicator/bot results (Admin 2026-09-15). branch = the tree key the agent studies.
+          # model_name/params/band = identity + task-size rating (heavy L=14B, M=7-8B) stamped on every post.
           - { slot: 1, agent: "research-logic",   branch: "loop-evolve",    lane: "research-loop self-improvement (meta)",
+              model_name: "DeepSeek-R1-7B", params: "7B", band: "M",
               model_repo: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF", model_file: "DeepSeek-R1-Distill-Qwen-7B-Q5_K_M" }
           - { slot: 2, agent: "research-reason",  branch: "indicator-next", lane: "indicator next-version hypotheses",
+              model_name: "Qwen3-8B", params: "8B", band: "M",
               model_repo: "unsloth/Qwen3-8B-GGUF",                     model_file: "Qwen3-8B-Q5_K_M" }
           - { slot: 3, agent: "research-tooluse", branch: "method-scout",   lane: "new methods/tools to adopt",
+              model_name: "Llama-3.1-8B", params: "8B", band: "M",
               model_repo: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", model_file: "Meta-Llama-3.1-8B-Instruct-Q5_K_M" }
           - { slot: 4, agent: "research-broad",   branch: "adaptation",     lane: "evolve-as-we-go regime adaptation",
+              model_name: "gemma-2-9b-it", params: "9B", band: "M+",
               model_repo: "bartowski/gemma-2-9b-it-GGUF",              model_file: "gemma-2-9b-it-Q4_K_M" }
           - { slot: 5, agent: "research-verify",  branch: "overfit-proof",  lane: "proving edges with less data",
+              model_name: "Qwen3-14B", params: "14B", band: "L",
               model_repo: "unsloth/Qwen3-14B-GGUF",                    model_file: "Qwen3-14B-Q4_K_M" }
     steps:
       - name: Fetch llama.cpp (CPU) + the agent script
@@ -79,6 +85,9 @@ jobs:
           CC_POST_AS:      "${{ vars.CC_POST_AS || 'engine' }}"
           AGENT:           "${{ matrix.agent }}-${{ github.run_id }}"
           BRANCH:          "${{ matrix.branch }}"
+          MODEL_NAME:      "${{ matrix.model_name }}"
+          MODEL_PARAMS:    "${{ matrix.params }}"
+          BAND:            "${{ matrix.band }}"
           LANE:            "${{ matrix.lane }}"
           MODEL_URL:       "http://127.0.0.1:8080"
           # The forward improvement tree (public build repo, same place as the agent script).
