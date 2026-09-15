@@ -1,0 +1,96 @@
+# B4L Runner Agents - 5 INDEPENDENT research agents, one per spare GitHub runner (4-core/16GB).
+# Master 2026-09-15: retire the pooled 30B-A3B coder (Flash 4.1 is cheaper for hard reasoning). Repurpose the
+# slots as a DATA-PARALLEL research swarm: each runner holds its OWN 7-14B GGUF (no pooling, no RPC = robust +
+# fast), studies its lane, posts findings to the Command Center, and VERIFIES peers - the swarm cross-checks
+# instead of grading its own homework. Flash 4.1 handles the deep reasoning on demand; this fleet does volume.
+#
+# Repo secrets:  HF_TOKEN (read-only model dl)   CC_AGENT_TOKEN (post/read the CC board)
+# Repo vars:     CC_BASE (default https://bull4life.com/cc)
+#
+# Yields to builds: `concurrency` keeps ONE window; tools/fleet_build.sh cancels this run to free slots for a
+# node/app build, then the respawn/cron brings the swarm back. 6h GitHub cap -> ~5.5h window then self-respawn.
+name: b4l-runner-agents
+on:
+  workflow_dispatch:
+    inputs:
+      window_min: { description: "agent window (min); <6h cap. self-respawns after", default: "330", required: false }
+  schedule:
+    - cron: "15 */6 * * *"   # every 6h (staggered off :00 per bull4life-github-throttle); respawn is the real driver
+
+concurrency:
+  group: runner-agents
+  cancel-in-progress: false   # a running window is never cut by the next spin; fleet_build.sh cancels to free slots
+
+env:
+  # llama.cpp CPU release tarball (contains llama-server). Bump with the fleet's other pins.
+  LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10701/llama-b10701-bin-ubuntu-x64.tar.gz"
+  # research_agent.py lives on the PUBLIC build repo (runners can't checkout the private engine repo).
+  AGENT_SCRIPT_URL: "https://raw.githubusercontent.com/Bull4Life/bull4life-build/main/research_agent.py"
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # FIVE DIVERSE families (diversity catches different blind spots). Sizes fit one 16GB runner.
+          # >>> FILL model_repo / model_file from the gemini+groq 2026-09-15 last-month tiny-AI report <<<
+          # The defaults below are known-good current GGUFs so the harness runs today; swap per the report.
+          # 5 VERIFIED-REAL diverse families (all HF-checked 200, 2026-09-15). The free fleet HALLUCINATED
+          # every "newest" model it proposed (all 401) - so these are engine-verified real repos. Swap to
+          # genuinely-newer ones only after HF-verifying the repo AND the exact .gguf file exist.
+          - { slot: 1, agent: "research-logic",   lane: "formal logic, proof, and step-by-step reasoning",
+              model_repo: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF", model_file: "DeepSeek-R1-Distill-Qwen-7B-Q5_K_M" }
+          - { slot: 2, agent: "research-reason",  lane: "causal reasoning and hypothesis generation",
+              model_repo: "unsloth/Qwen3-8B-GGUF",                     model_file: "Qwen3-8B-Q5_K_M" }
+          - { slot: 3, agent: "research-tooluse", lane: "tool-use, planning, and agentic decomposition",
+              model_repo: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", model_file: "Meta-Llama-3.1-8B-Instruct-Q5_K_M" }
+          - { slot: 4, agent: "research-broad",   lane: "broad literature survey and synthesis",
+              model_repo: "bartowski/gemma-2-9b-it-GGUF",              model_file: "gemma-2-9b-it-Q4_K_M" }
+          - { slot: 5, agent: "research-verify",  lane: "adversarial verification and fitted-vs-real checks",
+              model_repo: "unsloth/Qwen3-14B-GGUF",                    model_file: "Qwen3-14B-Q4_K_M" }
+    steps:
+      - name: Fetch llama.cpp (CPU) + the agent script
+        run: |
+          curl -fsSL "$LLAMACPP_URL" -o llama.tgz
+          mkdir -p llama && tar -xzf llama.tgz -C llama
+          find llama -type f -name 'llama-*' -exec chmod +x {} \;
+          curl -fsSL "$AGENT_SCRIPT_URL" -o research_agent.py
+          echo "agent script: $(wc -l < research_agent.py) lines"
+      - name: Download this slot's GGUF to the big disk (/mnt ~70GB)
+        run: |
+          sudo mkdir -p /mnt/m && sudo chown "$USER" /mnt/m
+          BASE="https://huggingface.co/${{ matrix.model_repo }}/resolve/main/${{ matrix.model_file }}.gguf"
+          echo "slot ${{ matrix.slot }} (${{ matrix.agent }}): $BASE"
+          curl -fsSL --retry 6 --retry-all-errors -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+            "$BASE" -o /mnt/m/model.gguf
+          test "$(stat -c%s /mnt/m/model.gguf)" -gt 1000000000 || { echo "model dl too small - abort"; head -c 300 /mnt/m/model.gguf; exit 1; }
+          echo "model: $(du -h /mnt/m/model.gguf | cut -f1)"
+      - name: Serve the model locally + run the research agent for the window
+        env:
+          CC_BASE:         ${{ vars.CC_BASE || 'https://bull4life.com/cc' }}
+          CC_AGENT_TOKEN:  ${{ secrets.CC_AGENT_TOKEN }}
+          AGENT:           "${{ matrix.agent }}-${{ github.run_id }}"
+          LANE:            "${{ matrix.lane }}"
+          MODEL_URL:       "http://127.0.0.1:8080"
+          BOARD:           "group"
+          WINDOW_SEC:      "${{ fromJSON(inputs.window_min || '330') }}"
+        run: |
+          SRV=$(find llama -name 'llama-server' -type f | head -1)
+          echo "serving ${{ matrix.model_file }} on :8080"
+          nohup "$SRV" -m /mnt/m/model.gguf --host 127.0.0.1 --port 8080 -c 8192 -np 1 -t 4 -b 1024 \
+            --no-warmup > /mnt/m/srv.log 2>&1 &
+          # normalize WINDOW_SEC (input is minutes) -> seconds for the agent
+          export WINDOW_SEC=$(( ${{ fromJSON(inputs.window_min || '330') }} * 60 ))
+          python3 research_agent.py || { echo "agent exited; server log tail:"; tail -8 /mnt/m/srv.log; }
+
+  respawn:
+    needs: agent
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions: { actions: write }
+    steps:
+      - name: Re-arm the swarm for the next window (cron is only a fallback; cancel = kill switch)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh workflow run runner_agents.yml --ref main -R "${{ github.repository }}" || true
