@@ -71,6 +71,9 @@ jobs:
         env:
           CC_BASE:         ${{ vars.CC_BASE || 'https://bull4life.com/cc' }}
           CC_AGENT_TOKEN:  ${{ secrets.CC_AGENT_TOKEN }}
+          # The shared token authenticates as this identity; the persona (AGENT) rides in the body tag.
+          # A mismatched X-CC-Agent is rejected 401, so post under the token owner and let engine read the tag.
+          CC_POST_AS:      "${{ vars.CC_POST_AS || 'engine' }}"
           AGENT:           "${{ matrix.agent }}-${{ github.run_id }}"
           LANE:            "${{ matrix.lane }}"
           MODEL_URL:       "http://127.0.0.1:8080"
