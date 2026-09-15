@@ -40,15 +40,18 @@ jobs:
           # 5 VERIFIED-REAL diverse families (all HF-checked 200, 2026-09-15). The free fleet HALLUCINATED
           # every "newest" model it proposed (all 401) - so these are engine-verified real repos. Swap to
           # genuinely-newer ones only after HF-verifying the repo AND the exact .gguf file exist.
-          - { slot: 1, agent: "research-logic",   lane: "formal logic, proof, and step-by-step reasoning",
+          # Each agent OWNS a forward branch of the improvement tree (compute/fleet_workflows/improvement_tree.json).
+          # The mission is FORWARD: build past what is proven, feed engine testable candidates -- never re-chew
+          # settled strategy/indicator/bot results (Admin 2026-09-15). branch = the tree key the agent studies.
+          - { slot: 1, agent: "research-logic",   branch: "loop-evolve",    lane: "research-loop self-improvement (meta)",
               model_repo: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF", model_file: "DeepSeek-R1-Distill-Qwen-7B-Q5_K_M" }
-          - { slot: 2, agent: "research-reason",  lane: "causal reasoning and hypothesis generation",
+          - { slot: 2, agent: "research-reason",  branch: "indicator-next", lane: "indicator next-version hypotheses",
               model_repo: "unsloth/Qwen3-8B-GGUF",                     model_file: "Qwen3-8B-Q5_K_M" }
-          - { slot: 3, agent: "research-tooluse", lane: "tool-use, planning, and agentic decomposition",
+          - { slot: 3, agent: "research-tooluse", branch: "method-scout",   lane: "new methods/tools to adopt",
               model_repo: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", model_file: "Meta-Llama-3.1-8B-Instruct-Q5_K_M" }
-          - { slot: 4, agent: "research-broad",   lane: "broad literature survey and synthesis",
+          - { slot: 4, agent: "research-broad",   branch: "adaptation",     lane: "evolve-as-we-go regime adaptation",
               model_repo: "bartowski/gemma-2-9b-it-GGUF",              model_file: "gemma-2-9b-it-Q4_K_M" }
-          - { slot: 5, agent: "research-verify",  lane: "adversarial verification and fitted-vs-real checks",
+          - { slot: 5, agent: "research-verify",  branch: "overfit-proof",  lane: "proving edges with less data",
               model_repo: "unsloth/Qwen3-14B-GGUF",                    model_file: "Qwen3-14B-Q4_K_M" }
     steps:
       - name: Fetch llama.cpp (CPU) + the agent script
@@ -75,9 +78,13 @@ jobs:
           # A mismatched X-CC-Agent is rejected 401, so post under the token owner and let engine read the tag.
           CC_POST_AS:      "${{ vars.CC_POST_AS || 'engine' }}"
           AGENT:           "${{ matrix.agent }}-${{ github.run_id }}"
+          BRANCH:          "${{ matrix.branch }}"
           LANE:            "${{ matrix.lane }}"
           MODEL_URL:       "http://127.0.0.1:8080"
-          BOARD:           "group"
+          # The forward improvement tree (public build repo, same place as the agent script).
+          TREE_URL:        "https://raw.githubusercontent.com/Bull4Life/bull4life-build/main/improvement_tree.json"
+          # Dedicated research board -- keeps the swarm's volume OFF the shared group channel (no more spam there).
+          BOARD:           "research"
           WINDOW_SEC:      "${{ fromJSON(inputs.window_min || '330') }}"
         run: |
           SRV=$(find llama -name 'llama-server' -type f | head -1)
