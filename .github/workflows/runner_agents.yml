@@ -1,8 +1,12 @@
 # B4L Runner Agents - 5 INDEPENDENT research agents, one per spare GitHub runner (4-core/16GB).
-# Master 2026-09-15: retire the pooled 30B-A3B coder (Flash 4.1 is cheaper for hard reasoning). Repurpose the
-# slots as a DATA-PARALLEL research swarm: each runner holds its OWN 7-14B GGUF (no pooling, no RPC = robust +
-# fast), studies its lane, posts findings to the Command Center, and VERIFIES peers - the swarm cross-checks
-# instead of grading its own homework. Flash 4.1 handles the deep reasoning on demand; this fleet does volume.
+# Master 2026-09-16 REASONING-FLEET UPGRADE: the scorecard PROVED the dense 7-8B swarm was junk (tooluse
+# Llama-8B 0.0, logic DeepSeek-R1-7B 0.0 hit-rate) - small dense models generate textbook-TA restatements,
+# not testable candidates. FIX: swap every slot to a REASONING-grade model, and pick FIVE DIFFERENT FAMILIES
+# on purpose (Alibaba/DeepSeek/Google/Microsoft/OpenAI-oss) - five clones would agree and miss the same things;
+# five lineages DISAGREE, and hermes (the curator) mines the disagreement. All fit one 16GB runner because MoE
+# models (Qwen3-30B-A3B, gpt-oss-20b) activate only ~3B/token, and the dense picks are <=13.7GB. No Colibri
+# needed here (llama.cpp already computes only the active experts); Colibri's home is the laptop escalation tier.
+# WORKERS (this fleet, volume) -> hermes CURATOR (kills junk, merges disagreement) -> engine KING (tests+folds).
 #
 # Repo secrets:  HF_TOKEN (read-only model dl)   CC_AGENT_TOKEN (post/read the CC board)
 # Repo vars:     CC_BASE (default https://bull4life.com/cc)
@@ -34,31 +38,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # FIVE DIVERSE families (diversity catches different blind spots). Sizes fit one 16GB runner.
-          # >>> FILL model_repo / model_file from the gemini+groq 2026-09-15 last-month tiny-AI report <<<
-          # The defaults below are known-good current GGUFs so the harness runs today; swap per the report.
-          # 5 VERIFIED-REAL diverse families (all HF-checked 200, 2026-09-15). The free fleet HALLUCINATED
-          # every "newest" model it proposed (all 401) - so these are engine-verified real repos. Swap to
-          # genuinely-newer ones only after HF-verifying the repo AND the exact .gguf file exist.
-          # Each agent OWNS a forward branch of the improvement tree (compute/fleet_workflows/improvement_tree.json).
-          # The mission is FORWARD: build past what is proven, feed engine testable candidates -- never re-chew
-          # settled strategy/indicator/bot results (Admin 2026-09-15). branch = the tree key the agent studies.
-          # model_name/params/band = identity + task-size rating (heavy L=14B, M=7-8B) stamped on every post.
-          - { slot: 1, agent: "research-logic",   branch: "loop-evolve",    lane: "research-loop self-improvement (meta)",
-              model_name: "DeepSeek-R1-7B", params: "7B", band: "M",
-              model_repo: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF", model_file: "DeepSeek-R1-Distill-Qwen-7B-Q5_K_M" }
-          - { slot: 2, agent: "research-reason",  branch: "indicator-next", lane: "indicator next-version hypotheses",
-              model_name: "Qwen3-8B", params: "8B", band: "M",
-              model_repo: "unsloth/Qwen3-8B-GGUF",                     model_file: "Qwen3-8B-Q5_K_M" }
-          - { slot: 3, agent: "research-tooluse", branch: "method-scout",   lane: "new methods/tools to adopt",
-              model_name: "Llama-3.1-8B", params: "8B", band: "M",
-              model_repo: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", model_file: "Meta-Llama-3.1-8B-Instruct-Q5_K_M" }
-          - { slot: 4, agent: "research-broad",   branch: "adaptation",     lane: "evolve-as-we-go regime adaptation",
-              model_name: "gemma-2-9b-it", params: "9B", band: "M+",
-              model_repo: "bartowski/gemma-2-9b-it-GGUF",              model_file: "gemma-2-9b-it-Q4_K_M" }
-          - { slot: 5, agent: "research-verify",  branch: "overfit-proof",  lane: "proving edges with less data",
-              model_name: "Qwen3-14B", params: "14B", band: "L",
-              model_repo: "unsloth/Qwen3-14B-GGUF",                    model_file: "Qwen3-14B-Q4_K_M" }
+          # FIVE DIFFERENT FAMILIES (creativity = disagreement across lineages, not five of one model).
+          # ALL HF-verified real (HTTP 200) + size-checked to fit a 16GB runner, engine 2026-09-16:
+          #   Qwen3-30B-A3B-Thinking Q3_K_M 13.7GB (MoE, ~3B active) · DeepSeek-R1-14B Q4 8.4GB · gpt-oss-20b
+          #   Q4 10.8GB (MoE) · phi-4 Q4 8.4GB · gemma-2-27b Q3_K_M 12.5GB. Swap to newer only after HF-verifying
+          #   BOTH the repo AND the exact .gguf exist (the free fleet hallucinated every "newest" repo -> 401).
+          # Each agent OWNS one forward branch of the improvement tree (compute/fleet_workflows/improvement_tree.json).
+          # Mission is FORWARD: build past what is proven, feed engine testable candidates -- never re-chew settled
+          # strategy/indicator/bot results (Admin 2026-09-15). branch = the tree key the agent studies.
+          # THE ARMY (role -> family): Reasoner(Qwen/overfit-proof) Skeptic(DeepSeek/loop-evolve)
+          #   Scout(Google/adaptation) Sharpshooter(Microsoft/indicator-next) Wildcard(OpenAI-oss/method-scout).
+          - { slot: 1, agent: "research-reason",  branch: "overfit-proof",  lane: "proving edges with less data (fewer-slot significance)",
+              model_name: "Qwen3-30B-A3B-Thinking", params: "30B-A3B", band: "XL",
+              model_repo: "unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF",  model_file: "Qwen3-30B-A3B-Thinking-2507-Q3_K_M" }
+          - { slot: 2, agent: "research-verify",  branch: "loop-evolve",    lane: "research-loop self-improvement (meta) + adversarial verify",
+              model_name: "DeepSeek-R1-14B", params: "14B", band: "L",
+              model_repo: "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF", model_file: "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M" }
+          - { slot: 3, agent: "research-broad",   branch: "adaptation",     lane: "evolve-as-we-go regime adaptation",
+              model_name: "gemma-2-27b-it", params: "27B", band: "L",
+              model_repo: "bartowski/gemma-2-27b-it-GGUF",             model_file: "gemma-2-27b-it-Q3_K_M" }
+          - { slot: 4, agent: "research-indicator", branch: "indicator-next", lane: "indicator next-version hypotheses (structured/math)",
+              model_name: "phi-4", params: "14B", band: "L",
+              model_repo: "bartowski/phi-4-GGUF",                      model_file: "phi-4-Q4_K_M" }
+          - { slot: 5, agent: "research-scout",   branch: "method-scout",   lane: "new methods/tools to adopt (creative outlier)",
+              model_name: "gpt-oss-20b", params: "20B-MoE", band: "L",
+              model_repo: "unsloth/gpt-oss-20b-GGUF",                  model_file: "gpt-oss-20b-Q4_K_M" }
     steps:
       - name: Fetch llama.cpp (CPU) + the agent script
         run: |
