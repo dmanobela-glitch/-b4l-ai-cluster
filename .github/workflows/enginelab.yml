@@ -8,6 +8,8 @@
 # - PUBLIC LOGS: nothing private is printed; every worker writes to its own files; the summary prints counts only.
 # - mode=smoke runs ONE short lab_eval on one runner (proves the harness end to end) and prints only the verdict line.
 name: enginelab
+# a storm wave's run is named "... storm wave ...": bunny_storm.py stop cancels only those, never the regular lab run
+run-name: ${{ inputs.until && format('enginelab storm wave {0}', inputs.runners) || format('enginelab {0}', inputs.mode || 'lab') }}
 on:
   schedule:
     - cron: '35 */6 * * *'
