@@ -54,7 +54,10 @@ jobs:
           set +e
           export JOB_END=$(( $(date +%s) + 345*60 ))
           P="$HOME/sitefleet/pids"; mkdir -p "$P"
-          start() { setsid bash "$HOME/sitefleet/run_gh.sh" "site_spacebunny$1" > /dev/null 2>&1 < /dev/null & echo $! > "$P/$1"; }
+          # Run 36885796159 (10-01) was cancelled at 10 min: 8 claude CLIs starved the runner agent, which lost
+          # contact with GitHub (engine hit the same on runner A). So each worker runs niced and first in line for
+          # the OOM killer; the runner agent keeps its CPU and memory.
+          start() { setsid bash -c 'echo 1000 > /proc/self/oom_score_adj; exec nice -n 15 bash "$0" "$1"' "$HOME/sitefleet/run_gh.sh" "site_spacebunny$1" > /dev/null 2>&1 < /dev/null & echo $! > "$P/$1"; }
           trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
           for n in 13 14 15 16 17 18 19 20; do start $n; sleep 20; done
           echo "8 workers started"
