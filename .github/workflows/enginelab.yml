@@ -59,7 +59,7 @@ jobs:
           if not os.path.isfile(p):
               print('SMOKE: no result'); raise SystemExit(1)
           s = json.load(open(p))
-          print('SMOKE:', json.dumps({k: s[k] for k in ('off_identity', 'acts', 'errored_rows', 'paired_rows', 'minutes')}))
+          print('SMOKE:', json.dumps({k: s[k] for k in ('off_identity', 'acts', 'errored_rows', 'errors', 'paired_rows', 'minutes')}))
           raise SystemExit(0 if s['off_identity'].split()[0] == s['off_identity'].split()[-1] and s['acts'] and not s['errored_rows'] else 1)
           PY
 
