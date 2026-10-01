@@ -154,10 +154,18 @@ jobs:
           export JOB_END=$(( $(date +%s) + 345*60 )) ROLE=lab
           # an extra wave never outlives its deadline (bunny_storm.py `until`)
           if [ -n "$UNTIL" ] && [ "$UNTIL" -lt "$JOB_END" ]; then export JOB_END=$UNTIL; fi
+          # __B4L_LAB_MEMGUARD__ (engine 10-01, storm runs 36894435217 / 36894447507: 7 of 10 runners got a shutdown
+          # signal 10-60 min in, with 4 ultracode workers per runner fanning out sub-agents on a 4-core 16 GB VM):
+          # 8 GB extra swap so a spike slows the box instead of killing it, and a memory line in the log every 2 min
+          # so the next death shows its cause.
+          sudo fallocate -l 8G /mnt/lab.swap && sudo chmod 600 /mnt/lab.swap && sudo mkswap -q /mnt/lab.swap \
+            && sudo swapon /mnt/lab.swap || echo "::warning::extra swap not added"
+          ( while sleep 120; do echo "MEM $(date -u +%H:%M) used/total $(free -m | awk '/Mem/{print $3"/"$2}') swap $(free -m | awk '/Swap/{print $3"/"$2}') load $(cut -d' ' -f1 /proc/loadavg) lab_procs $(pgrep -c -u lab)"; done ) &
           for i in 0 1 2 3 4 5 6 7; do
             n=$(( 21 + 8*RUNNER_NO + i ))
-            # A/B (engine 10-01): odd-numbered workers run with ultracode (multi-agent workflows), even ones without
-            if [ $(( n % 2 )) -eq 1 ]; then export ULTRA=1; else export ULTRA=; fi
+            # A/B (engine 10-01): ONE worker per runner runs ultracode (multi-agent workflows), the other 7 without.
+            # It was every odd worker (4 per runner) until the memory deaths above.
+            if [ "$i" -eq 0 ]; then export ULTRA=1; else export ULTRA=; fi
             # niced + first in line for the OOM killer, so the runner agent survives (runner A run 1 starved at 6 min)
             ( echo 1000 > /proc/self/oom_score_adj
               exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL env "PATH=$PATH" \
@@ -171,6 +179,7 @@ jobs:
         if: always()
         run: |
           # /home/lab is 0750 (lab only), so the glob runs under sudo
+          sudo dmesg 2>/dev/null | grep -iE 'out of memory|killed process|oom' | tail -5 || true
           for d in $(sudo sh -c 'ls -d /home/lab/bunnies/engine_spacebunny*/ 2>/dev/null'); do
             sudo test -f "$d/logs/runner.log" || continue
             echo "$(basename "$d"): starts=$(sudo grep -c ' start ' "$d/logs/runner.log") ends=$(sudo grep -c ' end ' "$d/logs/runner.log")"
@@ -192,4 +201,9 @@ jobs:
           MODEL: ${{ inputs.model }}
         run: |
           if [ $(( UNTIL - $(date +%s) )) -lt 1800 ]; then echo "storm deadline reached, no respawn"; exit 0; fi
-          gh workflow run enginelab.yml -R "$GITHUB_REPOSITORY" -f mode=lab -f runners="$RUNNERS" -f until="$UNTIL" -f model="$MODEL" && echo "next window dispatched" || echo "::warning::respawn dispatch failed"
+          # ONE run per runner from here on: `needs: [lab]` waits for the whole matrix, so in a 5-runner run a runner
+          # that died at minute 10 sat idle until the last one ended (run 36894435217: 4 of 5 dead from 17:05 to 17:39).
+          for r in $(echo "$RUNNERS" | jq -r '.[]'); do
+            gh workflow run enginelab.yml -R "$GITHUB_REPOSITORY" -f mode=lab -f runners="[$r]" -f until="$UNTIL" -f model="$MODEL" \
+              && echo "runner $r: next window dispatched" || echo "::warning::runner $r: respawn dispatch failed"
+          done
