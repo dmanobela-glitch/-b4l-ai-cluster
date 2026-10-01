@@ -17,11 +17,25 @@ on:
         description: 'lab (4 runners x 8 workers) or smoke (one harness check)'
         required: false
         default: 'lab'
+      runners:
+        description: 'extra wave: JSON list of lab runner numbers (workers 21+8R..28+8R); empty = the regular 0-3'
+        required: false
+        default: ''
+      until:
+        description: 'extra wave: epoch s; the wave re-dispatches itself after each window until then (empty = once)'
+        required: false
+        default: ''
+      model:
+        description: 'free OpenRouter model id for the workers (empty = the kit default)'
+        required: false
+        default: ''
+# the regular cron run keeps group enginelab-lab; an extra wave gets its own group per runner list
 concurrency:
-  group: enginelab-${{ inputs.mode || 'lab' }}
+  group: enginelab-${{ inputs.mode || 'lab' }}${{ inputs.runners && format('-{0}', inputs.runners) || '' }}
   cancel-in-progress: false
 permissions:
   contents: read
+  actions: write
 jobs:
   smoke:
     if: ${{ inputs.mode == 'smoke' }}
@@ -30,13 +44,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: dmanobela-glitch/-b4l-ai-cluster
           ref: labkit
           path: payload
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - name: deps
-        run: pip install --quiet numpy pandas matplotlib scipy ccxt
+        run: |
+          pip install --quiet numpy pandas matplotlib scipy ccxt
+          npm i -g @anthropic-ai/claude-code > /dev/null 2>&1 && claude --version
       - name: decrypt engine
         env:
           KIT_KEY: ${{ secrets.B4L_KIT_KEY }}
@@ -52,7 +72,7 @@ jobs:
           export JOB_END=1 ROLE=lab ULTRA=1 OPENROUTER_API_KEY=x
           ( echo 1000 > /proc/self/oom_score_adj
             exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA env "PATH=$PATH" \
-              setsid -w nice -n 15 bash -c 'echo "user=$(whoami) home=$HOME role=$ROLE ultra=$ULTRA nice=$(nice) oom=$(cat /proc/self/oom_score_adj)"; python3 -c "import numpy, pandas, scipy; print(\"py ok\")"; sudo -n true 2>/dev/null && echo "SUDO OPEN" || echo "no sudo"; w=$(pgrep -f Runner.Worker | head -1); kill -0 "$w" 2>/dev/null && echo "CAN SIGNAL runner" || echo "cannot signal runner (pid $w)"' )
+              setsid -w nice -n 15 bash -c 'echo "user=$(whoami) home=$HOME role=$ROLE ultra=$ULTRA nice=$(nice) oom=$(cat /proc/self/oom_score_adj)"; python3 -c "import numpy, pandas, scipy; print(\"py ok\")"; echo "claude $(claude --version 2>&1 | head -1)"; sudo -n true 2>/dev/null && echo "SUDO OPEN" || echo "no sudo"; w=$(pgrep -f Runner.Worker | head -1); kill -0 "$w" 2>/dev/null && echo "CAN SIGNAL runner" || echo "cannot signal runner (pid $w)"' )
           echo "sandbox rc $?"
       - name: harness smoke (2 tags, identical trees, an ON that must act)
         run: |
@@ -78,10 +98,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [0, 1, 2, 3]
+        runner: ${{ fromJSON(inputs.runners || '[0, 1, 2, 3]') }}
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: dmanobela-glitch/-b4l-ai-cluster
           ref: labkit
           path: payload
       - uses: actions/setup-python@v5
@@ -120,6 +141,8 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           RUNNER_NO: ${{ matrix.runner }}
+          BUNNY_MODEL: ${{ inputs.model }}
+          UNTIL: ${{ inputs.until }}
         run: |
           # SANDBOX (lab run 36889040368: runner 0 got a shutdown signal 9 min after its workers started). The workers
           # run as the unprivileged user `lab` with no sudo, so no worker command can stop the runner or its processes.
@@ -127,13 +150,15 @@ jobs:
           sudo cp -a "$HOME/bunnies" "$HOME/engine" "$HOME/cc.env" /home/lab/
           sudo chown -R lab:lab /home/lab
           export JOB_END=$(( $(date +%s) + 345*60 )) ROLE=lab
+          # an extra wave never outlives its deadline (bunny_storm.py `until`)
+          if [ -n "$UNTIL" ] && [ "$UNTIL" -lt "$JOB_END" ]; then export JOB_END=$UNTIL; fi
           for i in 0 1 2 3 4 5 6 7; do
             n=$(( 21 + 8*RUNNER_NO + i ))
             # A/B (engine 10-01): odd-numbered workers run with ultracode (multi-agent workflows), even ones without
             if [ $(( n % 2 )) -eq 1 ]; then export ULTRA=1; else export ULTRA=; fi
             # niced + first in line for the OOM killer, so the runner agent survives (runner A run 1 starved at 6 min)
             ( echo 1000 > /proc/self/oom_score_adj
-              exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA env "PATH=$PATH" \
+              exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL env "PATH=$PATH" \
                 setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
             sleep 20
           done
@@ -143,7 +168,26 @@ jobs:
       - name: summary (counts only)
         if: always()
         run: |
-          for d in /home/lab/bunnies/engine_spacebunny*/; do
+          # /home/lab is 0750 (lab only), so the glob runs under sudo
+          for d in $(sudo sh -c 'ls -d /home/lab/bunnies/engine_spacebunny*/ 2>/dev/null'); do
             sudo test -f "$d/logs/runner.log" || continue
             echo "$(basename "$d"): starts=$(sudo grep -c ' start ' "$d/logs/runner.log") ends=$(sudo grep -c ' end ' "$d/logs/runner.log")"
           done
+
+  # __B4L_STORM_RESPAWN__ (engine 10-01): an extra wave (tools/bunny_storm.py) re-dispatches itself after each window
+  # until its `until` deadline, like the donate grid's respawn. A cancelled run does not respawn: cancel = stop.
+  respawn:
+    needs: [lab]
+    if: ${{ always() && !cancelled() && inputs.until != '' && inputs.mode != 'smoke' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: next window (only before the deadline)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNERS: ${{ inputs.runners }}
+          UNTIL: ${{ inputs.until }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          if [ $(( UNTIL - $(date +%s) )) -lt 1800 ]; then echo "storm deadline reached, no respawn"; exit 0; fi
+          gh workflow run enginelab.yml -R "$GITHUB_REPOSITORY" -f mode=lab -f runners="$RUNNERS" -f until="$UNTIL" -f model="$MODEL" && echo "next window dispatched" || echo "::warning::respawn dispatch failed"
