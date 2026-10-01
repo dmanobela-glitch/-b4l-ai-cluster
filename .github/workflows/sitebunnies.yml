@@ -1,0 +1,64 @@
+# sitebunnies.yml - site's 8 free workers (sitebunny13..sitebunny20) on ONE GitHub-hosted runner ("runner B").
+# site 2026-10-01, admin's order: "8 more helpers for engine and 8 more for site". Copy of engine's
+# enginebunnies.yml (runner A) with its own concurrency group and a cron offset so the two never start together.
+# - ONE job, 8 background loops. Each loop = one fresh `claude -p` per task row, model locked to the free
+#   OpenRouter stealth model; no Anthropic credential exists here (cannot bill Claude).
+# - Lanes: 13-16 marketing, 17-18 copy-qa, 19-20 audit-cc (kit/lanes_gh.json). Tasks come from the CC hub
+#   (site_dispatch.py on the laptop); results go back as hub artifacts, never as messages.
+# - PUBLIC LOGS: nothing private is printed. Keys are repo secrets, the kit comes from the CC hub
+#   (site/current/kit/sitebunny-kit.txt), workers write only to their own log files, the summary prints counts.
+name: sitebunnies
+on:
+  schedule:
+    - cron: '50 */6 * * *'
+  workflow_dispatch:
+concurrency:
+  group: sitebunnies
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  bunnies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install claude cli
+        run: |
+          npm i -g @anthropic-ai/claude-code > /dev/null 2>&1 && claude --version
+          # sbcc.mjs `shot` looks for /usr/bin/chromium; the hosted image ships google-chrome
+          [ -x /usr/bin/chromium ] || sudo ln -sf "$(command -v google-chrome)" /usr/bin/chromium
+      - name: fetch kit
+        env:
+          CC_AGENT_TOKEN: ${{ secrets.CC_AGENT_TOKEN }}
+        run: |
+          set -eu
+          umask 077
+          mkdir -p "$HOME/sitefleet"
+          printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/sitefleet/cc.env"
+          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: sitebunny13" \
+            "https://bull4life.com/cc/api/artifacts/read?rel=site/current/kit/sitebunny-kit.txt" \
+            | jq -r .body | base64 -d | tar xz -C "$HOME/sitefleet"
+          chmod +x "$HOME/sitefleet/run_gh.sh"
+          echo "kit files: $(find "$HOME/sitefleet" -type f | wc -l)"
+      - name: run 8 sitebunnies
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          export JOB_END=$(( $(date +%s) + 345*60 ))
+          for n in 13 14 15 16 17 18 19 20; do
+            bash "$HOME/sitefleet/run_gh.sh" "sitebunny$n" > /dev/null 2>&1 &
+            sleep 20
+          done
+          echo "8 workers started"
+          wait
+          echo "all workers ended"
+      - name: summary (counts only)
+        if: always()
+        run: |
+          for d in "$HOME"/sitefleet/sitebunny*/; do
+            [ -f "$d/logs/runner.log" ] || continue
+            echo "$(basename "$d"): starts=$(grep -c ' start ' "$d/logs/runner.log") ends=$(grep -c ' end ' "$d/logs/runner.log") progress=$(grep -c ' progress ' "$d/logs/runner.log")"
+          done
