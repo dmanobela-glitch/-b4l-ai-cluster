@@ -37,7 +37,7 @@ jobs:
           printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/cc.env"
           mkdir -p "$HOME/bunnies"
           curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: bunny13" \
-            "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/kit/bunny-kit.txt" \
+            "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/kit/bunny-kit.md" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/bunnies"
           chmod +x "$HOME/bunnies/run_gh.sh"
           echo "kit files: $(find "$HOME/bunnies" -type f | wc -l)"
