@@ -1,0 +1,62 @@
+# enginebunnies.yml - engine's 8 free research workers (bunny13..bunny20) on ONE GitHub-hosted runner.
+# engine 2026-10-01, admin's order: "8 more space bunny per github runner". Lives in the PUBLIC repo
+# dmanobela-glitch/-b4l-ai-cluster (hosted minutes are free only in public repos); mirror kept in the engine repo
+# at compute/fleet_workflows/enginebunnies.yml.
+# - ONE job, 8 background loops (a matrix would take 8 runners). Each loop = one fresh `claude -p` per task row,
+#   model locked to the free OpenRouter stealth model; no Anthropic credential exists here (cannot bill Claude).
+# - The job is capped at 350 min; JOB_END stops new rows ~5h45m in, so no run is killed mid-task. The cron restarts
+#   it every 6 h; the concurrency group keeps two copies from overlapping.
+# - PUBLIC LOGS: nothing private is printed. Keys are repo secrets, the kit comes from the CC hub (not this repo),
+#   every worker writes only to its own log files, and the summary prints counts only.
+name: enginebunnies
+on:
+  schedule:
+    - cron: '20 */6 * * *'
+  workflow_dispatch:
+concurrency:
+  group: enginebunnies
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  bunnies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install claude cli
+        run: npm i -g @anthropic-ai/claude-code > /dev/null 2>&1 && claude --version
+      - name: fetch kit
+        env:
+          CC_AGENT_TOKEN: ${{ secrets.CC_AGENT_TOKEN }}
+        run: |
+          set -eu
+          umask 077
+          printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/cc.env"
+          mkdir -p "$HOME/bunnies"
+          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: bunny13" \
+            "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/kit/bunny-kit.txt" \
+            | jq -r .body | base64 -d | tar xz -C "$HOME/bunnies"
+          chmod +x "$HOME/bunnies/run_gh.sh"
+          echo "kit files: $(find "$HOME/bunnies" -type f | wc -l)"
+      - name: run 8 bunnies
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          export JOB_END=$(( $(date +%s) + 345*60 ))
+          for n in 13 14 15 16 17 18 19 20; do
+            bash "$HOME/bunnies/run_gh.sh" "bunny$n" > /dev/null 2>&1 &
+            sleep 20
+          done
+          echo "8 workers started"
+          wait
+          echo "all workers ended"
+      - name: summary (counts only)
+        if: always()
+        run: |
+          for d in "$HOME"/bunnies/bunny*/; do
+            [ -f "$d/logs/runner.log" ] || continue
+            echo "$(basename "$d"): starts=$(grep -c ' start ' "$d/logs/runner.log") ends=$(grep -c ' end ' "$d/logs/runner.log")"
+          done
