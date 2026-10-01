@@ -36,7 +36,7 @@ jobs:
           umask 077
           printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/cc.env"
           mkdir -p "$HOME/bunnies"
-          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: bunny13" \
+          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: engine_spacebunny13" \
             "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/kit/bunny-kit.md" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/bunnies"
           chmod +x "$HOME/bunnies/run_gh.sh"
@@ -49,7 +49,7 @@ jobs:
           for n in 13 14 15 16 17 18 19 20; do
             # run 1 (10-01) starved the runner ("lost communication" at 6 min): workers run niced, and the
             # kernel's OOM killer takes a worker first, never the runner agent
-            ( echo 1000 > /proc/self/oom_score_adj; exec nice -n 15 bash "$HOME/bunnies/run_gh.sh" "bunny$n" ) > /dev/null 2>&1 &
+            ( echo 1000 > /proc/self/oom_score_adj; exec nice -n 15 bash "$HOME/bunnies/run_gh.sh" "engine_spacebunny$n" ) > /dev/null 2>&1 &
             sleep 20
           done
           echo "8 workers started"
@@ -58,7 +58,7 @@ jobs:
       - name: summary (counts only)
         if: always()
         run: |
-          for d in "$HOME"/bunnies/bunny*/; do
+          for d in "$HOME"/bunnies/engine_spacebunny*/; do
             [ -f "$d/logs/runner.log" ] || continue
             echo "$(basename "$d"): starts=$(grep -c ' start ' "$d/logs/runner.log") ends=$(grep -c ' end ' "$d/logs/runner.log")"
           done
