@@ -51,6 +51,8 @@ jobs:
           cp -a "$HOME/engine" "$HOME/t_base"; cp -a "$HOME/engine" "$HOME/t_patched"
           python3 "$HOME/engine/tools/lab_eval.py" --base "$HOME/t_base" --patched "$HOME/t_patched" \
             --on-env '{"B4L_TP_TAKER_PCT": "0.2"}' --half screen --tags 2 --jobs 3 --out "$HOME/t_out" > "$HOME/t_log.txt" 2>&1 || true
+          # exception class lines only (no settings, no source): enough to see WHY a run died
+          cat "$HOME/t_log.txt" "$HOME"/t_out/*/log_*.txt 2>/dev/null | grep -E '^[A-Za-z_.]*(Error|Exception|Exit)[: ]|"error"' | cut -c1-160 | sort | uniq -c | head -8
           python3 - <<'PY'
           import json, os
           p = os.path.expanduser('~/t_out/lab_result.json')
@@ -113,7 +115,10 @@ jobs:
         run: |
           export JOB_END=$(( $(date +%s) + 345*60 )) ROLE=lab
           for i in 0 1 2 3 4 5 6 7; do
-            bash "$HOME/bunnies/run_gh.sh" "bunny$(( 21 + 8*RUNNER_NO + i ))" > /dev/null 2>&1 &
+            n=$(( 21 + 8*RUNNER_NO + i ))
+            # A/B (engine 10-01): odd-numbered workers run with ultracode (multi-agent workflows), even ones without
+            if [ $(( n % 2 )) -eq 1 ]; then u=1; else u=; fi
+            ULTRA=$u bash "$HOME/bunnies/run_gh.sh" "bunny$n" > /dev/null 2>&1 &
             sleep 20
           done
           echo "8 lab workers started on runner $RUNNER_NO"
