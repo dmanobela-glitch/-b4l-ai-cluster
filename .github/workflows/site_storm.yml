@@ -1,0 +1,112 @@
+# site_storm.yml - site's BUNNY STORM wave (admin 10-01 via engine: lend donate runners to the spacebunny fleet for 24 h).
+# Started by engine's tools/bunny_storm.py (entry owner "site" in ~/B4L_Bunnies_shared/registry/storm_waves.json).
+# - Matrix of runners; runner R hosts 8 workers site_spacebunny(21+8R) .. (28+8R). Lanes: kit/lanes_gh.json (box gh-storm):
+#   code and research lanes only (security, scout, audit-site, audit-cc, copy-qa, marketing), no media renders.
+# - Free OpenRouter model only (`model` input, kit default if empty); no Anthropic credential exists here.
+# - SANDBOX (engine's lab fix): workers run as the unprivileged user `lab`, niced, first for the OOM killer, so no worker
+#   can stop or starve the runner. Dispatch (site_dispatch.py on the laptop) gives them rows only while the storm is on.
+# - PUBLIC LOGS: nothing private is printed; workers write only to their own log files; the summary prints counts.
+name: site_storm
+run-name: ${{ inputs.until && format('site storm wave {0}', inputs.runners) || 'site storm (no deadline)' }}
+on:
+  workflow_dispatch:
+    inputs:
+      runners:
+        description: 'JSON list of runner numbers, e.g. [0, 1]'
+        default: '[0]'
+      until:
+        description: 'storm deadline, epoch s; the wave re-dispatches itself after each window until then'
+        default: ''
+      model:
+        description: 'free OpenRouter model id for the workers (empty = the kit default)'
+        default: ''
+concurrency:
+  group: site-storm-${{ inputs.runners }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: write
+jobs:
+  wave:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runners || '[0]') }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install claude cli
+        run: |
+          npm i -g @anthropic-ai/claude-code > /dev/null 2>&1 && claude --version
+          [ -x /usr/bin/chromium ] || sudo ln -sf "$(command -v google-chrome)" /usr/bin/chromium
+      - name: fetch kit
+        env:
+          CC_AGENT_TOKEN: ${{ secrets.CC_AGENT_TOKEN }}
+        run: |
+          set -eu
+          umask 077
+          mkdir -p "$HOME/sitefleet"
+          printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/sitefleet/cc.env"
+          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: site_spacebunny21" \
+            "https://bull4life.com/cc/api/artifacts/read?rel=site/current/kit/site-spacebunny-kit.txt" \
+            | jq -r .body | base64 -d | tar xz -C "$HOME/sitefleet"
+          echo "kit files: $(find "$HOME/sitefleet" -type f | wc -l)"
+      - name: run 8 storm workers
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          RUNNER_NO: ${{ matrix.runner }}
+          BUNNY_MODEL: ${{ inputs.model }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          set +e
+          sudo useradd -m -s /bin/bash lab
+          sudo cp -a "$HOME/sitefleet" /home/lab/
+          sudo chown -R lab:lab /home/lab
+          export JOB_END=$(( $(date +%s) + 345*60 ))
+          if [ -n "$UNTIL" ] && [ "$UNTIL" -lt "$JOB_END" ]; then export JOB_END=$UNTIL; fi
+          P="$HOME/pids"; mkdir -p "$P"
+          start() {
+            ( echo 1000 > /proc/self/oom_score_adj
+              exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,BUNNY_MODEL env "PATH=$PATH" \
+                setsid -w nice -n 15 bash /home/lab/sitefleet/run_gh.sh "site_spacebunny$1" ) > /dev/null 2>&1 < /dev/null &
+            echo $! > "$P/$1"; }
+          trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
+          W=""; for i in 0 1 2 3 4 5 6 7; do W="$W $(( 21 + 8*RUNNER_NO + i ))"; done
+          for n in $W; do start $n; sleep 20; done
+          echo "8 storm workers started on runner $RUNNER_NO"
+          restarts=0
+          while [ $(date +%s) -lt $(( JOB_END - 900 )) ]; do
+            for n in $W; do
+              kill -0 "$(cat "$P/$n")" 2>/dev/null || { restarts=$((restarts + 1)); start $n; }
+            done
+            sleep 60 & wait $!
+          done
+          while pgrep -f "run_gh.sh site_spacebunny" > /dev/null; do sleep 30 & wait $!; done
+          echo "all workers ended, restarts=$restarts"
+      - name: summary (counts only)
+        if: always()
+        run: |
+          for d in $(sudo sh -c 'ls -d /home/lab/sitefleet/site_spacebunny*/ 2>/dev/null'); do
+            sudo test -f "$d/logs/runner.log" || continue
+            echo "$(basename "$d"): starts=$(sudo grep -c ' start ' "$d/logs/runner.log") ends=$(sudo grep -c ' end ' "$d/logs/runner.log") progress=$(sudo grep -c ' progress ' "$d/logs/runner.log")"
+          done
+
+  # __B4L_STORM_RESPAWN__ (engine's pattern): the next window, only before the deadline. A cancelled run (stop) does not respawn.
+  respawn:
+    needs: [wave]
+    if: ${{ always() && !cancelled() && inputs.until != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: next window
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNERS: ${{ inputs.runners }}
+          UNTIL: ${{ inputs.until }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          if [ $(( UNTIL - $(date +%s) )) -lt 1800 ]; then echo "storm deadline reached, no respawn"; exit 0; fi
+          gh workflow run site_storm.yml -R "$GITHUB_REPOSITORY" -f runners="$RUNNERS" -f until="$UNTIL" -f model="$MODEL" && echo "next window dispatched" || echo "::warning::respawn dispatch failed"
