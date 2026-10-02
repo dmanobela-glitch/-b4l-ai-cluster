@@ -154,13 +154,17 @@ jobs:
           export JOB_END=$(( $(date +%s) + 345*60 )) ROLE=lab
           # an extra wave never outlives its deadline (bunny_storm.py `until`)
           if [ -n "$UNTIL" ] && [ "$UNTIL" -lt "$JOB_END" ]; then export JOB_END=$UNTIL; fi
-          # __B4L_LAB_MEMGUARD__ (engine 10-01, storm runs 36894435217 / 36894447507: 7 of 10 runners got a shutdown
-          # signal 10-60 min in, with 4 ultracode workers per runner fanning out sub-agents on a 4-core 16 GB VM):
-          # 8 GB extra swap so a spike slows the box instead of killing it, and a memory line in the log every 2 min
-          # so the next death shows its cause.
-          sudo fallocate -l 8G /mnt/lab.swap && sudo chmod 600 /mnt/lab.swap && sudo mkswap -q /mnt/lab.swap \
-            && sudo swapon /mnt/lab.swap || echo "::warning::extra swap not added"
-          ( while sleep 120; do echo "MEM $(date -u +%H:%M) used/total $(free -m | awk '/Mem/{print $3"/"$2}') swap $(free -m | awk '/Swap/{print $3"/"$2}') load $(cut -d' ' -f1 /proc/loadavg) lab_procs $(pgrep -c -u lab)"; done ) &
+          # __B4L_LAB_MEMGUARD__ v2 (admin 10-02 "memory cap at 15/16 GB"). v1 (10-01) added 8 GB swap so a spike would
+          # slow the box instead of killing it; run 36967217688 lab (2) still died 15 min in (4.7 -> 13.4 GB in 2 min,
+          # then 15.8 GB + 10 GB swap -> shutdown signal), so swap only delayed it. Now every lab process runs inside
+          # ONE cgroup, b4llab.slice: MemoryMax = 15/16 of the box, no swap for it, MemoryHigh = 14/16 (the kernel
+          # reclaims/throttles there first). When the slice is full the kernel kills a lab process INSIDE it; the runner
+          # agent sits outside and keeps its memory. A memory line every 2 min (slice use + its OOM kills).
+          MT=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+          printf '[Slice]\nMemoryAccounting=yes\nMemoryHigh=%dK\nMemoryMax=%dK\nMemorySwapMax=0\n' $(( MT*14/16 )) $(( MT*15/16 )) \
+            | sudo tee /etc/systemd/system/b4llab.slice > /dev/null
+          sudo systemctl daemon-reload
+          ( while sleep 120; do echo "MEM $(date -u +%H:%M) used/total $(free -m | awk '/Mem/{print $3"/"$2}') swap $(free -m | awk '/Swap/{print $3"/"$2}') load $(cut -d' ' -f1 /proc/loadavg) lab_procs $(pgrep -c -u lab) slice_mb $(( $(cat /sys/fs/cgroup/b4llab.slice/memory.current 2>/dev/null || echo 0) / 1048576 )) slice_oom $(awk '/^oom_kill /{print $2}' /sys/fs/cgroup/b4llab.slice/memory.events 2>/dev/null)"; done ) &
           # 6 workers per box, not 8 (admin 10-02; run 36937576079: runners 0 and 2 died of memory at 15.8/16 GB, ~90
           # lab procs). Slots 6 and 7 (engine_spacebunny 21+8R+6, +7) stay unused; bcc.mjs `next` also takes no new
           # task while used RAM is at or above 15/16 of the box.
@@ -170,11 +174,29 @@ jobs:
             # It was every odd worker (4 per runner) until the memory deaths above.
             if [ "$i" -eq 0 ]; then export ULTRA=1; else export ULTRA=; fi
             # niced + first in line for the OOM killer, so the runner agent survives (runner A run 1 starved at 6 min)
+            # systemd-run --scope runs the command itself (env inherited) in a new scope under b4llab.slice; every child
+            # (claude, sub-agents, backtests) stays in that cgroup
             ( echo 1000 > /proc/self/oom_score_adj
-              exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL env "PATH=$PATH" \
-                setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
+              exec sudo --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL systemd-run --scope -q \
+                --slice=b4llab.slice -- sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL \
+                env "PATH=$PATH" setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
             sleep 20
           done
+          # the cap must not cost the window: if systemd-run put nothing in the slice, start the workers uncapped
+          sleep 10
+          if [ "$(cat /sys/fs/cgroup/b4llab.slice/cgroup.procs 2>/dev/null | wc -l)" -eq 0 ]; then
+            echo "::warning::b4llab.slice is empty, workers start WITHOUT the memory cap"
+            for i in 0 1 2 3 4 5; do
+              n=$(( 21 + 8*RUNNER_NO + i ))
+              if [ "$i" -eq 0 ]; then export ULTRA=1; else export ULTRA=; fi
+              ( echo 1000 > /proc/self/oom_score_adj
+                exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL env "PATH=$PATH" \
+                  setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
+              sleep 20
+            done
+          else
+            echo "slice cap: $(cat /sys/fs/cgroup/b4llab.slice/memory.max) bytes, $(cat /sys/fs/cgroup/b4llab.slice/cgroup.procs | wc -l) procs in it"
+          fi
           echo "6 lab workers started on runner $RUNNER_NO"
           wait
           echo "all workers ended"
