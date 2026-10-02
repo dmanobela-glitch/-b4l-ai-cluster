@@ -159,12 +159,13 @@ jobs:
           # then 15.8 GB + 10 GB swap -> shutdown signal), so swap only delayed it. Now every lab process runs inside
           # ONE cgroup, b4llab.slice: MemoryMax = 15/16 of the box, no swap for it, MemoryHigh = 14/16 (the kernel
           # reclaims/throttles there first). When the slice is full the kernel kills a lab process INSIDE it; the runner
-          # agent sits outside and keeps its memory. A memory line every 2 min (slice use + its OOM kills).
+          # agent sits outside and keeps its memory. A memory line every minute (slice use + its OOM kills); 2 min hid
+          # a 4.7 -> 13.4 GB spike between two lines.
           MT=$(awk '/MemTotal/{print $2}' /proc/meminfo)
           printf '[Slice]\nMemoryAccounting=yes\nMemoryHigh=%dK\nMemoryMax=%dK\nMemorySwapMax=0\n' $(( MT*14/16 )) $(( MT*15/16 )) \
             | sudo tee /etc/systemd/system/b4llab.slice > /dev/null
           sudo systemctl daemon-reload
-          ( while sleep 120; do echo "MEM $(date -u +%H:%M) used/total $(free -m | awk '/Mem/{print $3"/"$2}') swap $(free -m | awk '/Swap/{print $3"/"$2}') load $(cut -d' ' -f1 /proc/loadavg) lab_procs $(pgrep -c -u lab) slice_mb $(( $(cat /sys/fs/cgroup/b4llab.slice/memory.current 2>/dev/null || echo 0) / 1048576 )) slice_oom $(awk '/^oom_kill /{print $2}' /sys/fs/cgroup/b4llab.slice/memory.events 2>/dev/null)"; done ) &
+          ( while sleep 60; do echo "MEM $(date -u +%H:%M) used/total $(free -m | awk '/Mem/{print $3"/"$2}') swap $(free -m | awk '/Swap/{print $3"/"$2}') load $(cut -d' ' -f1 /proc/loadavg) lab_procs $(pgrep -c -u lab) slice_mb $(( $(cat /sys/fs/cgroup/b4llab.slice/memory.current 2>/dev/null || echo 0) / 1048576 )) slice_oom $(awk '/^oom_kill /{print $2}' /sys/fs/cgroup/b4llab.slice/memory.events 2>/dev/null)"; done ) &
           # 6 workers per box, not 8 (admin 10-02; run 36937576079: runners 0 and 2 died of memory at 15.8/16 GB, ~90
           # lab procs). Slots 6 and 7 (engine_spacebunny 21+8R+6, +7) stay unused; bcc.mjs `next` also takes no new
           # task while used RAM is at or above 15/16 of the box.
@@ -182,9 +183,13 @@ jobs:
                 env "PATH=$PATH" setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
             sleep 20
           done
-          # the cap must not cost the window: if systemd-run put nothing in the slice, start the workers uncapped
+          # the cap must not cost the window: if systemd-run put nothing in the slice, start the workers uncapped.
+          # Count the slice's whole SUBTREE: on cgroup v2 the processes sit in run-*.scope children and the slice's own
+          # cgroup.procs is always empty (run 36969134267 lab (2) read 0 there, started 6 uncapped duplicates beside the
+          # 6 capped workers, and died 23 min in).
           sleep 10
-          if [ "$(cat /sys/fs/cgroup/b4llab.slice/cgroup.procs 2>/dev/null | wc -l)" -eq 0 ]; then
+          SLICE_PROCS=$( (cat /sys/fs/cgroup/b4llab.slice/cgroup.procs /sys/fs/cgroup/b4llab.slice/*/cgroup.procs 2>/dev/null || true) | wc -l)
+          if [ "$SLICE_PROCS" -eq 0 ]; then
             echo "::warning::b4llab.slice is empty, workers start WITHOUT the memory cap"
             for i in 0 1 2 3 4 5; do
               n=$(( 21 + 8*RUNNER_NO + i ))
@@ -195,7 +200,7 @@ jobs:
               sleep 20
             done
           else
-            echo "slice cap: $(cat /sys/fs/cgroup/b4llab.slice/memory.max) bytes, $(cat /sys/fs/cgroup/b4llab.slice/cgroup.procs | wc -l) procs in it"
+            echo "slice cap: $(cat /sys/fs/cgroup/b4llab.slice/memory.max) bytes, $SLICE_PROCS procs in it"
           fi
           echo "6 lab workers started on runner $RUNNER_NO"
           wait
