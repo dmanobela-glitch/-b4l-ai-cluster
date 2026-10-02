@@ -1,6 +1,8 @@
 # site_storm.yml - site's BUNNY STORM wave (admin 10-01 via engine: lend donate runners to the spacebunny fleet for 24 h).
 # Started by engine's tools/bunny_storm.py (entry owner "site" in ~/B4L_Bunnies_shared/registry/storm_waves.json).
-# - Matrix of runners; runner R hosts 4 workers site_spacebunny(21+4R) .. (24+4R) (admin 10-02: 4 per runner, max effort). Lanes: kit/lanes_gh.json (box gh-storm):
+# - Matrix of runners; runner R hosts 2 workers site_spacebunny(21+4R) and (23+4R), ultracode + max effort. 10-02: 4 per
+#   runner died after 13-33 min ("runner has received a shutdown signal", 3 of 4 runners), so 2 per runner, a watchdog
+#   that kills the heaviest worker before memory or disk runs out, and a resource line every 5 min in the log. Lanes: kit/lanes_gh.json (box gh-storm):
 #   code and research lanes only (security, scout, audit-site, audit-cc, copy-qa, marketing), no media renders.
 # - Free OpenRouter model only (`model` input, kit default if empty); no Anthropic credential exists here.
 # - SANDBOX (engine's lab fix): workers run as the unprivileged user `lab`, niced, first for the OOM killer, so no worker
@@ -54,7 +56,7 @@ jobs:
             "https://bull4life.com/cc/api/artifacts/read?rel=site/current/kit/site-spacebunny-kit.txt" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/sitefleet"
           echo "kit files: $(find "$HOME/sitefleet" -type f | wc -l)"
-      - name: run 4 storm workers
+      - name: run 2 storm workers
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OR_KEY_1: ${{ secrets.OR_KEY_1 }}
@@ -82,18 +84,27 @@ jobs:
                 setsid -w nice -n 15 bash /home/lab/sitefleet/run_gh.sh "site_spacebunny$1" ) > /dev/null 2>&1 < /dev/null &
             echo $! > "$P/$1"; }
           trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
-          W=""; for i in 0 1 2 3; do W="$W $(( 21 + 4*RUNNER_NO + i ))"; done
+          W=""; for i in 0 2; do W="$W $(( 21 + 4*RUNNER_NO + i ))"; done
           for n in $W; do start $n; sleep 20; done
-          echo "4 storm workers started on runner $RUNNER_NO"
-          restarts=0
+          echo "2 storm workers started on runner $RUNNER_NO"
+          restarts=0; kills=0; tick=0
+          res() { echo "res $(date -u +%T) mem_avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo) disk_free_mb=$(df -m / | awk 'NR==2{print $4}') load=$(cut -d' ' -f1 /proc/loadavg) claude_procs=$(pgrep -u lab -fc claude)"; }
+          res
           while [ $(date +%s) -lt $(( JOB_END - 900 )) ]; do
             for n in $W; do
               kill -0 "$(cat "$P/$n")" 2>/dev/null || { restarts=$((restarts + 1)); start $n; }
             done
+            # watchdog: below 1.5 GB RAM or 2 GB disk, kill the heaviest worker process (its row is retried) so the runner lives
+            if [ "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" -lt 1500 ] || [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ]; then
+              v=$(ps -u lab -o pid=,rss= --sort=-rss | awk 'NR==1{print $1}')
+              [ -n "$v" ] && sudo kill -9 "$v" && kills=$((kills + 1)) && echo "watchdog killed 1 worker process" && res
+              [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ] && sudo sh -c 'rm -rf /home/lab/.cache/* /home/lab/.npm/_cacache 2>/dev/null'
+            fi
+            tick=$((tick + 1)); [ $((tick % 5)) -eq 0 ] && res
             sleep 60 & wait $!
           done
           while pgrep -f "run_gh.sh site_spacebunny" > /dev/null; do sleep 30 & wait $!; done
-          echo "all workers ended, restarts=$restarts"
+          echo "all workers ended, restarts=$restarts watchdog_kills=$kills"
       - name: summary (counts only)
         if: always()
         run: |
