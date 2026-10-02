@@ -1,6 +1,6 @@
 # site_storm.yml - site's BUNNY STORM wave (admin 10-01 via engine: lend donate runners to the spacebunny fleet for 24 h).
 # Started by engine's tools/bunny_storm.py (entry owner "site" in ~/B4L_Bunnies_shared/registry/storm_waves.json).
-# - Matrix of runners; runner R hosts 8 workers site_spacebunny(21+8R) .. (28+8R). Lanes: kit/lanes_gh.json (box gh-storm):
+# - Matrix of runners; runner R hosts 4 workers site_spacebunny(21+4R) .. (24+4R) (admin 10-02: 4 per runner, max effort). Lanes: kit/lanes_gh.json (box gh-storm):
 #   code and research lanes only (security, scout, audit-site, audit-cc, copy-qa, marketing), no media renders.
 # - Free OpenRouter model only (`model` input, kit default if empty); no Anthropic credential exists here.
 # - SANDBOX (engine's lab fix): workers run as the unprivileged user `lab`, niced, first for the OOM killer, so no worker
@@ -54,14 +54,22 @@ jobs:
             "https://bull4life.com/cc/api/artifacts/read?rel=site/current/kit/site-spacebunny-kit.txt" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/sitefleet"
           echo "kit files: $(find "$HOME/sitefleet" -type f | wc -l)"
-      - name: run 8 storm workers
+      - name: run 4 storm workers
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OR_KEY_1: ${{ secrets.OR_KEY_1 }}
+          OR_KEY_2: ${{ secrets.OR_KEY_2 }}
+          OR_KEY_3: ${{ secrets.OR_KEY_3 }}
           RUNNER_NO: ${{ matrix.runner }}
           BUNNY_MODEL: ${{ inputs.model }}
           UNTIL: ${{ inputs.until }}
         run: |
           set +e
+          # admin 10-02: spread the storm over the 3 named OpenRouter accounts, one per runner in turn
+          # (OR_KEY_1 Dmanobleagb, OR_KEY_2 bull4lifeb4l, OR_KEY_3 dmanobela); the old single secret is the fallback.
+          case $(( RUNNER_NO % 3 )) in 0) K=$OR_KEY_1;; 1) K=$OR_KEY_2;; *) K=$OR_KEY_3;; esac
+          [ -n "$K" ] && export OPENROUTER_API_KEY=$K
+          unset OR_KEY_1 OR_KEY_2 OR_KEY_3 K
           sudo useradd -m -s /bin/bash lab
           sudo cp -a "$HOME/sitefleet" /home/lab/
           sudo chown -R lab:lab /home/lab
@@ -74,9 +82,9 @@ jobs:
                 setsid -w nice -n 15 bash /home/lab/sitefleet/run_gh.sh "site_spacebunny$1" ) > /dev/null 2>&1 < /dev/null &
             echo $! > "$P/$1"; }
           trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
-          W=""; for i in 0 1 2 3 4 5 6 7; do W="$W $(( 21 + 8*RUNNER_NO + i ))"; done
+          W=""; for i in 0 1 2 3; do W="$W $(( 21 + 4*RUNNER_NO + i ))"; done
           for n in $W; do start $n; sleep 20; done
-          echo "8 storm workers started on runner $RUNNER_NO"
+          echo "4 storm workers started on runner $RUNNER_NO"
           restarts=0
           while [ $(date +%s) -lt $(( JOB_END - 900 )) ]; do
             for n in $W; do
