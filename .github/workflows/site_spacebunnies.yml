@@ -1,5 +1,5 @@
-# site_spacebunnies.yml - site's free workers on ONE GitHub-hosted runner ("runner B"): 2 of them, site_spacebunny13 + 19
-# (10-02: 4 ultracode/max-effort CLIs per runner killed 4 storm runners in 13-43 min; 14-18 and 20 are lanes.json "off").
+# site_spacebunnies.yml - site's free workers on ONE GitHub-hosted runner ("runner B"): site_cpu05 (fix) + site_cpu06
+# (marketing) since the 10-02 reorg (was site_spacebunny13 + 19). 4 CLIs per runner killed 4 storm runners in 13-43 min.
 # Was 8 workers (site_spacebunny13..site_spacebunny20; renamed from sitebunnyN 10-01, admin: owner = name prefix) on ONE GitHub-hosted runner ("runner B").
 # site 2026-10-01, admin's order: "8 more helpers for engine and 8 more for site". Copy of engine's
 # enginebunnies.yml (runner A) with its own concurrency group and a cron offset so the two never start together.
@@ -40,12 +40,12 @@ jobs:
           umask 077
           mkdir -p "$HOME/sitefleet"
           printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/sitefleet/cc.env"
-          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: site_spacebunny13" \
+          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: site_cpu05" \
             "https://bull4life.com/cc/api/artifacts/read?rel=site/current/kit/site-spacebunny-kit.txt" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/sitefleet"
           chmod +x "$HOME/sitefleet/run_gh.sh"
           echo "kit files: $(find "$HOME/sitefleet" -type f | wc -l)"
-      - name: run 8 site_spacebunnies
+      - name: run site_cpu05 + site_cpu06
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         # Run 36876600021 (10-01) died 6 min in with exit 143: something SIGTERMed this step shell, most likely a
@@ -59,9 +59,9 @@ jobs:
           # Run 36885796159 (10-01) was cancelled at 10 min: 8 claude CLIs starved the runner agent, which lost
           # contact with GitHub (engine hit the same on runner A). So each worker runs niced and first in line for
           # the OOM killer; the runner agent keeps its CPU and memory.
-          start() { setsid bash -c 'echo 1000 > /proc/self/oom_score_adj; exec nice -n 15 bash "$0" "$1"' "$HOME/sitefleet/run_gh.sh" "site_spacebunny$1" > /dev/null 2>&1 < /dev/null & echo $! > "$P/$1"; }
+          start() { setsid bash -c 'echo 1000 > /proc/self/oom_score_adj; exec nice -n 15 bash "$0" "$1"' "$HOME/sitefleet/run_gh.sh" "$1" > /dev/null 2>&1 < /dev/null & echo $! > "$P/$1"; }
           trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
-          W="13 19"
+          W="site_cpu05 site_cpu06"
           for n in $W; do start $n; sleep 20; done
           echo "2 workers started"
           restarts=0; kills=0; tick=0
@@ -69,7 +69,7 @@ jobs:
           res
           while [ $(date +%s) -lt $(( JOB_END - 900 )) ]; do
             for n in $W; do
-              kill -0 "$(cat "$P/$n")" 2>/dev/null || { restarts=$((restarts + 1)); echo "site_spacebunny$n exited, restart $restarts"; start $n; }
+              kill -0 "$(cat "$P/$n")" 2>/dev/null || { restarts=$((restarts + 1)); echo "$n exited, restart $restarts"; start $n; }
             done
             # watchdog: below 1.5 GB RAM or 2 GB disk, kill the heaviest claude process (its row is retried) so the runner lives
             if [ "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" -lt 1500 ] || [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ]; then
@@ -79,12 +79,12 @@ jobs:
             tick=$((tick + 1)); [ $((tick % 5)) -eq 0 ] && res
             sleep 60 & wait $!
           done
-          while pgrep -f "run_gh.sh site_spacebunny" > /dev/null; do sleep 30 & wait $!; done
+          while pgrep -f "run_gh.sh site_" > /dev/null; do sleep 30 & wait $!; done
           echo "all workers ended, restarts=$restarts watchdog_kills=$kills"
       - name: summary (counts only)
         if: always()
         run: |
-          for d in "$HOME"/sitefleet/site_spacebunny*/; do
+          for d in "$HOME"/sitefleet/site_*/; do
             [ -f "$d/logs/runner.log" ] || continue
             echo "$(basename "$d"): starts=$(grep -c ' start ' "$d/logs/runner.log") ends=$(grep -c ' end ' "$d/logs/runner.log") progress=$(grep -c ' progress ' "$d/logs/runner.log")"
           done
