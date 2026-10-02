@@ -1,7 +1,7 @@
 # site_storm.yml - site's BUNNY STORM wave (admin 10-01 via engine: lend donate runners to the spacebunny fleet for 24 h).
 # Started by engine's tools/bunny_storm.py (entry owner "site" in ~/B4L_Bunnies_shared/registry/storm_waves.json).
-# - Matrix of runners; runner R hosts 2 workers site_spacebunny(21+4R) and (23+4R), ultracode + max effort. 10-02: 4 per
-#   runner died after 13-33 min ("runner has received a shutdown signal", 3 of 4 runners), so 2 per runner, a watchdog
+# - Matrix of runners; runner R (0-3) hosts ONE worker site_cpu(R+1): R0-1 merge, R2-3 fix (admin 10-02 reorg: fewer
+#   workers, each with room for its own sub-agents; names say cpu/gpu). 10-02: 4 per runner died after 13-33 min, so a watchdog
 #   that kills the heaviest worker before memory or disk runs out, and a resource line every 5 min in the log. Lanes: kit/lanes_gh.json (box gh-storm):
 #   code and research lanes only (security, scout, audit-site, audit-cc, copy-qa, marketing), no media renders.
 # - Free OpenRouter model only (`model` input, kit default if empty); no Anthropic credential exists here.
@@ -52,11 +52,11 @@ jobs:
           umask 077
           mkdir -p "$HOME/sitefleet"
           printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/sitefleet/cc.env"
-          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: site_spacebunny21" \
+          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: site_cpu01" \
             "https://bull4life.com/cc/api/artifacts/read?rel=site/current/kit/site-spacebunny-kit.txt" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/sitefleet"
           echo "kit files: $(find "$HOME/sitefleet" -type f | wc -l)"
-      - name: run 2 storm workers
+      - name: run the storm worker
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OR_KEY_1: ${{ secrets.OR_KEY_1 }}
@@ -81,12 +81,13 @@ jobs:
           start() {
             ( echo 1000 > /proc/self/oom_score_adj
               exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,BUNNY_MODEL env "PATH=$PATH" \
-                setsid -w nice -n 15 bash /home/lab/sitefleet/run_gh.sh "site_spacebunny$1" ) > /dev/null 2>&1 < /dev/null &
+                setsid -w nice -n 15 bash /home/lab/sitefleet/run_gh.sh "$1" ) > /dev/null 2>&1 < /dev/null &
             echo $! > "$P/$1"; }
           trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
-          W=""; for i in 0 2; do W="$W $(( 21 + 4*RUNNER_NO + i ))"; done
+          [ "$RUNNER_NO" -le 3 ] || { echo "runner $RUNNER_NO has no worker (site_cpu01-04 = R0-3)"; exit 0; }
+          W=$(printf "site_cpu%02d" $(( RUNNER_NO + 1 )))
           for n in $W; do start $n; sleep 20; done
-          echo "2 storm workers started on runner $RUNNER_NO"
+          echo "$W started on runner $RUNNER_NO"
           restarts=0; kills=0; tick=0
           res() { echo "res $(date -u +%T) mem_avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo) disk_free_mb=$(df -m / | awk 'NR==2{print $4}') load=$(cut -d' ' -f1 /proc/loadavg) claude_procs=$(pgrep -u lab -fc claude)"; }
           res
@@ -103,12 +104,12 @@ jobs:
             tick=$((tick + 1)); [ $((tick % 5)) -eq 0 ] && res
             sleep 60 & wait $!
           done
-          while pgrep -f "run_gh.sh site_spacebunny" > /dev/null; do sleep 30 & wait $!; done
+          while pgrep -f "run_gh.sh site_" > /dev/null; do sleep 30 & wait $!; done
           echo "all workers ended, restarts=$restarts watchdog_kills=$kills"
       - name: summary (counts only)
         if: always()
         run: |
-          for d in $(sudo sh -c 'ls -d /home/lab/sitefleet/site_spacebunny*/ 2>/dev/null'); do
+          for d in $(sudo sh -c 'ls -d /home/lab/sitefleet/site_*/ 2>/dev/null'); do
             sudo test -f "$d/logs/runner.log" || continue
             echo "$(basename "$d"): starts=$(sudo grep -c ' start ' "$d/logs/runner.log") ends=$(sudo grep -c ' end ' "$d/logs/runner.log") progress=$(sudo grep -c ' progress ' "$d/logs/runner.log")"
           done
