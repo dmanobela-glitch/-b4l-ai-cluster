@@ -1,4 +1,4 @@
-# enginelab.yml - engine's free LAB fleet: 4 hosted runners x 8 workers (bunny21..bunny52). engine 2026-10-01, admin:
+# enginelab.yml - engine's free LAB fleet: 4 hosted runners x 6 workers (slots 0-5 of bunny21..bunny52; 6 since admin 10-02). engine 2026-10-01, admin:
 # "spin more space bunnies ... they can test by them self". Lives in the PUBLIC repo -b4l-ai-cluster (free minutes);
 # mirror in the engine repo at compute/fleet_workflows/enginelab.yml.
 # - The engine source rides ONLY encrypted (orphan branch `labkit`, labkit.enc, key = repo secret B4L_KIT_KEY;
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'lab (4 runners x 8 workers) or smoke (one harness check)'
+        description: 'lab (4 runners x 6 workers) or smoke (one harness check)'
         required: false
         default: 'lab'
       runners:
@@ -139,7 +139,7 @@ jobs:
             "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/kit/bunny-kit.md" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/bunnies"
           echo "kit files: $(find "$HOME/bunnies" -type f | wc -l)"
-      - name: run 8 lab workers
+      - name: run 6 lab workers
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           RUNNER_NO: ${{ matrix.runner }}
@@ -161,7 +161,10 @@ jobs:
           sudo fallocate -l 8G /mnt/lab.swap && sudo chmod 600 /mnt/lab.swap && sudo mkswap -q /mnt/lab.swap \
             && sudo swapon /mnt/lab.swap || echo "::warning::extra swap not added"
           ( while sleep 120; do echo "MEM $(date -u +%H:%M) used/total $(free -m | awk '/Mem/{print $3"/"$2}') swap $(free -m | awk '/Swap/{print $3"/"$2}') load $(cut -d' ' -f1 /proc/loadavg) lab_procs $(pgrep -c -u lab)"; done ) &
-          for i in 0 1 2 3 4 5 6 7; do
+          # 6 workers per box, not 8 (admin 10-02; run 36937576079: runners 0 and 2 died of memory at 15.8/16 GB, ~90
+          # lab procs). Slots 6 and 7 (engine_spacebunny 21+8R+6, +7) stay unused; bcc.mjs `next` also takes no new
+          # task while used RAM is at or above 15/16 of the box.
+          for i in 0 1 2 3 4 5; do
             n=$(( 21 + 8*RUNNER_NO + i ))
             # A/B (engine 10-01): ONE worker per runner runs ultracode (multi-agent workflows), the other 7 without.
             # It was every odd worker (4 per runner) until the memory deaths above.
@@ -172,7 +175,7 @@ jobs:
                 setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
             sleep 20
           done
-          echo "8 lab workers started on runner $RUNNER_NO"
+          echo "6 lab workers started on runner $RUNNER_NO"
           wait
           echo "all workers ended"
       - name: summary (counts only)
