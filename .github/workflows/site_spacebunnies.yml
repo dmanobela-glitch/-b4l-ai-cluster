@@ -1,0 +1,90 @@
+# site_spacebunnies.yml - site's free workers on ONE GitHub-hosted runner ("runner B"): 2 of them, site_spacebunny13 + 19
+# (10-02: 4 ultracode/max-effort CLIs per runner killed 4 storm runners in 13-43 min; 14-18 and 20 are lanes.json "off").
+# Was 8 workers (site_spacebunny13..site_spacebunny20; renamed from sitebunnyN 10-01, admin: owner = name prefix) on ONE GitHub-hosted runner ("runner B").
+# site 2026-10-01, admin's order: "8 more helpers for engine and 8 more for site". Copy of engine's
+# enginebunnies.yml (runner A) with its own concurrency group and a cron offset so the two never start together.
+# - ONE job, 8 background loops. Each loop = one fresh `claude -p` per task row, model locked to the free
+#   OpenRouter stealth model; no Anthropic credential exists here (cannot bill Claude).
+# - Lanes: 13-16 marketing, 17-18 copy-qa, 19-20 audit-cc (kit/lanes_gh.json). Tasks come from the CC hub
+#   (site_dispatch.py on the laptop); results go back as hub artifacts, never as messages.
+# - PUBLIC LOGS: nothing private is printed. Keys are repo secrets, the kit comes from the CC hub
+#   (site/current/kit/site-spacebunny-kit.txt), workers write only to their own log files, the summary prints counts.
+name: site_spacebunnies
+on:
+  schedule:
+    - cron: '50 */6 * * *'
+  workflow_dispatch:
+concurrency:
+  group: site_spacebunnies
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  bunnies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install claude cli
+        run: |
+          npm i -g @anthropic-ai/claude-code > /dev/null 2>&1 && claude --version
+          # sbcc.mjs `shot` looks for /usr/bin/chromium; the hosted image ships google-chrome
+          [ -x /usr/bin/chromium ] || sudo ln -sf "$(command -v google-chrome)" /usr/bin/chromium
+      - name: fetch kit
+        env:
+          CC_AGENT_TOKEN: ${{ secrets.CC_AGENT_TOKEN }}
+        run: |
+          set -eu
+          umask 077
+          mkdir -p "$HOME/sitefleet"
+          printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/sitefleet/cc.env"
+          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: site_spacebunny13" \
+            "https://bull4life.com/cc/api/artifacts/read?rel=site/current/kit/site-spacebunny-kit.txt" \
+            | jq -r .body | base64 -d | tar xz -C "$HOME/sitefleet"
+          chmod +x "$HOME/sitefleet/run_gh.sh"
+          echo "kit files: $(find "$HOME/sitefleet" -type f | wc -l)"
+      - name: run 8 site_spacebunnies
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        # Run 36876600021 (10-01) died 6 min in with exit 143: something SIGTERMed this step shell, most likely a
+        # worker's `pkill`/`kill` by name. So: every worker runs in its own session (setsid), the step shell
+        # traps TERM (a handler, not an ignore, so the workers' children still get default signals), and a
+        # supervisor restarts any worker that exits before the job end. Restarts are printed as counts only.
+        run: |
+          set +e
+          export JOB_END=$(( $(date +%s) + 345*60 ))
+          P="$HOME/sitefleet/pids"; mkdir -p "$P"
+          # Run 36885796159 (10-01) was cancelled at 10 min: 8 claude CLIs starved the runner agent, which lost
+          # contact with GitHub (engine hit the same on runner A). So each worker runs niced and first in line for
+          # the OOM killer; the runner agent keeps its CPU and memory.
+          start() { setsid bash -c 'echo 1000 > /proc/self/oom_score_adj; exec nice -n 15 bash "$0" "$1"' "$HOME/sitefleet/run_gh.sh" "site_spacebunny$1" > /dev/null 2>&1 < /dev/null & echo $! > "$P/$1"; }
+          trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
+          W="13 19"
+          for n in $W; do start $n; sleep 20; done
+          echo "2 workers started"
+          restarts=0; kills=0; tick=0
+          res() { echo "res $(date -u +%T) mem_avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo) disk_free_mb=$(df -m / | awk 'NR==2{print $4}') load=$(cut -d' ' -f1 /proc/loadavg) claude_procs=$(pgrep -fc '[c]laude')"; }
+          res
+          while [ $(date +%s) -lt $(( JOB_END - 900 )) ]; do
+            for n in $W; do
+              kill -0 "$(cat "$P/$n")" 2>/dev/null || { restarts=$((restarts + 1)); echo "site_spacebunny$n exited, restart $restarts"; start $n; }
+            done
+            # watchdog: below 1.5 GB RAM or 2 GB disk, kill the heaviest claude process (its row is retried) so the runner lives
+            if [ "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" -lt 1500 ] || [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ]; then
+              v=$(ps -eo pid=,rss=,args= --sort=-rss | grep -E '[c]laude' | awk 'NR==1{print $1}')
+              [ -n "$v" ] && kill -9 "$v" && kills=$((kills + 1)) && echo "watchdog killed 1 worker process" && res
+            fi
+            tick=$((tick + 1)); [ $((tick % 5)) -eq 0 ] && res
+            sleep 60 & wait $!
+          done
+          while pgrep -f "run_gh.sh site_spacebunny" > /dev/null; do sleep 30 & wait $!; done
+          echo "all workers ended, restarts=$restarts watchdog_kills=$kills"
+      - name: summary (counts only)
+        if: always()
+        run: |
+          for d in "$HOME"/sitefleet/site_spacebunny*/; do
+            [ -f "$d/logs/runner.log" ] || continue
+            echo "$(basename "$d"): starts=$(grep -c ' start ' "$d/logs/runner.log") ends=$(grep -c ' end ' "$d/logs/runner.log") progress=$(grep -c ' progress ' "$d/logs/runner.log")"
+          done
