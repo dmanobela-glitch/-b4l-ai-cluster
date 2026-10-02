@@ -102,6 +102,29 @@ jobs:
       matrix:
         runner: ${{ fromJSON(inputs.runners || '[0, 1, 2, 3]') }}
     steps:
+      - name: one copy per runner (wait while another run holds this runner)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_NO: ${{ matrix.runner }}
+        run: |
+          # __B4L_LAB_ONE_COPY__ (engine 10-02): a replacement for a dead runner (dispatched with runners=[R], its own
+          # concurrency group) and the regular cron run (group enginelab-lab, runners 0-3) can both hold runner R, and
+          # two copies of its 6 workers would work the same claims. While another run has `lab (R)` in progress, wait
+          # (one API look per 5 min), then start; JOB_T0 keeps the workers' JOB_END inside this job's 350-min cap.
+          echo "JOB_T0=$(date +%s)" >> "$GITHUB_ENV"
+          live() {
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/enginelab.yml/runs?status=in_progress&per_page=50" \
+              -q '.workflow_runs[].id' 2>/dev/null | grep -vx "$GITHUB_RUN_ID" | while read -r id; do
+                gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=50" \
+                  -q ".jobs[] | select(.status==\"in_progress\" and .name==\"lab ($RUNNER_NO)\") | .id" 2>/dev/null
+              done | wc -l
+          }
+          end=$(( $(date +%s) + 300*60 ))
+          while [ "$(live)" -gt 0 ] && [ "$(date +%s)" -lt "$end" ]; do
+            echo "runner $RUNNER_NO is live in another run: waiting ($(date -u +%H:%M))"
+            sleep 300
+          done
+          echo "runner $RUNNER_NO free: starting ($(date -u +%H:%M))"
       - uses: actions/checkout@v4
         with:
           repository: dmanobela-glitch/-b4l-ai-cluster
@@ -154,6 +177,8 @@ jobs:
           export JOB_END=$(( $(date +%s) + 345*60 )) ROLE=lab
           # an extra wave never outlives its deadline (bunny_storm.py `until`)
           if [ -n "$UNTIL" ] && [ "$UNTIL" -lt "$JOB_END" ]; then export JOB_END=$UNTIL; fi
+          # __B4L_LAB_ONE_COPY__: time spent waiting for another copy of this runner counts against the job's cap
+          if [ -n "$JOB_T0" ] && [ $(( JOB_T0 + 340*60 )) -lt "$JOB_END" ]; then export JOB_END=$(( JOB_T0 + 340*60 )); fi
           # __B4L_LAB_MEMGUARD__ v2 (admin 10-02 "memory cap at 15/16 GB"). v1 (10-01) added 8 GB swap so a spike would
           # slow the box instead of killing it; run 36967217688 lab (2) still died 15 min in (4.7 -> 13.4 GB in 2 min,
           # then 15.8 GB + 10 GB swap -> shutdown signal), so swap only delayed it. Now every lab process runs inside
