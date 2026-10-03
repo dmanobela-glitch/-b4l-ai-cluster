@@ -95,14 +95,15 @@ jobs:
             for n in $W; do
               kill -0 "$(cat "$P/$n")" 2>/dev/null || { restarts=$((restarts + 1)); start $n; }
             done
-            # watchdog: below 1.5 GB RAM or 2 GB disk, kill the heaviest worker process (its row is retried) so the runner lives
-            if [ "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" -lt 1500 ] || [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ]; then
+            # watchdog: below 2.5 GB RAM or 2 GB disk, kill the heaviest worker process (its row is retried) so the runner lives.
+            # 10-03: runner B lost its runner when RAM fell 14 GB -> 0.6 GB between two 60 s checks; now every 10 s.
+            if [ "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" -lt 2500 ] || [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ]; then
               v=$(ps -u lab -o pid=,rss= --sort=-rss | awk 'NR==1{print $1}')
               [ -n "$v" ] && sudo kill -9 "$v" && kills=$((kills + 1)) && echo "watchdog killed 1 worker process" && res
               [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ] && sudo sh -c 'rm -rf /home/lab/.cache/* /home/lab/.npm/_cacache 2>/dev/null'
             fi
-            tick=$((tick + 1)); [ $((tick % 5)) -eq 0 ] && res
-            sleep 60 & wait $!
+            tick=$((tick + 1)); [ $((tick % 30)) -eq 0 ] && res
+            sleep 10 & wait $!
           done
           while pgrep -f "run_gh.sh site_" > /dev/null; do sleep 30 & wait $!; done
           echo "all workers ended, restarts=$restarts watchdog_kills=$kills"
