@@ -71,13 +71,17 @@ jobs:
             for n in $W; do
               kill -0 "$(cat "$P/$n")" 2>/dev/null || { restarts=$((restarts + 1)); echo "$n exited, restart $restarts"; start $n; }
             done
-            # watchdog: below 1.5 GB RAM or 2 GB disk, kill the heaviest claude process (its row is retried) so the runner lives
-            if [ "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" -lt 1500 ] || [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ]; then
-              v=$(ps -eo pid=,rss=,args= --sort=-rss | grep -E '[c]laude' | awk 'NR==1{print $1}')
+            # watchdog: below 2.5 GB RAM or 2 GB disk, kill the heaviest process in a worker's session (its row is retried) so
+            # the runner lives. 10-03 run 37101080613: RAM fell from 14 GB to 0.6 GB between two 60 s checks and the kill
+            # took the biggest `claude`, not the hog (a test/browser child), so GitHub shut the runner down. Now every 10 s,
+            # and the victim is any process whose session id is a worker's (each worker is started with setsid).
+            if [ "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" -lt 2500 ] || [ "$(df -m / | awk 'NR==2{print $4}')" -lt 2000 ]; then
+              sids=" $(for n in $W; do cat "$P/$n"; done | tr -s '[:space:]' ' ') "
+              v=$(ps -eo pid=,sid=,rss= --sort=-rss | awk -v s="$sids" 'index(s, " " $2 " ") {print $1; exit}')
               [ -n "$v" ] && kill -9 "$v" && kills=$((kills + 1)) && echo "watchdog killed 1 worker process" && res
             fi
-            tick=$((tick + 1)); [ $((tick % 5)) -eq 0 ] && res
-            sleep 60 & wait $!
+            tick=$((tick + 1)); [ $((tick % 30)) -eq 0 ] && res
+            sleep 10 & wait $!
           done
           while pgrep -f "run_gh.sh site_" > /dev/null; do sleep 30 & wait $!; done
           echo "all workers ended, restarts=$restarts watchdog_kills=$kills"
