@@ -51,7 +51,10 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           BUNNY_MODEL: ${{ inputs.model }}
+          # admin 10-04 role names: repo variable B4L_NEW_NAMES=1 -> engine_research06-11 (tools/fleet_names.py)
+          NEW_NAMES: ${{ vars.B4L_NEW_NAMES }}
         run: |
+          wname() { if [ "$NEW_NAMES" = 1 ]; then printf 'engine_research%02d' $(( $1 - 7 )); else echo "engine_spacebunny$1"; fi; }
           # SANDBOX (lab run 36889040368: a runner got a shutdown signal 9 min after its workers started). Workers run
           # as the unprivileged user `lab` with no sudo, so no worker command can stop the runner or its processes.
           sudo useradd -m -s /bin/bash lab
@@ -75,7 +78,7 @@ jobs:
             ( echo 1000 > /proc/self/oom_score_adj
               exec sudo --preserve-env=OPENROUTER_API_KEY,JOB_END,BUNNY_MODEL systemd-run --scope -q \
                 --slice=b4llab.slice -- sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,BUNNY_MODEL \
-                env "PATH=$PATH" setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
+                env "PATH=$PATH" setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "$(wname $n)" ) > /dev/null 2>&1 &
             sleep 20
           done
           # the cap must not cost the window: if systemd-run put nothing in the slice, start the workers uncapped.
@@ -87,7 +90,7 @@ jobs:
             for n in 13 14 15 16 17 18; do
               ( echo 1000 > /proc/self/oom_score_adj
                 exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,BUNNY_MODEL env "PATH=$PATH" \
-                  setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
+                  setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "$(wname $n)" ) > /dev/null 2>&1 &
               sleep 20
             done
           else
@@ -100,7 +103,7 @@ jobs:
         if: always()
         run: |
           # /home/lab is 0750 (lab only), so the glob runs under sudo
-          for d in $(sudo sh -c 'ls -d /home/lab/bunnies/engine_spacebunny*/ 2>/dev/null'); do
+          for d in $(sudo sh -c 'ls -d /home/lab/bunnies/engine_*/ 2>/dev/null'); do
             sudo test -f "$d/logs/runner.log" || continue
             echo "$(basename "$d"): starts=$(sudo grep -c ' start ' "$d/logs/runner.log") ends=$(sudo grep -c ' end ' "$d/logs/runner.log")"
           done
