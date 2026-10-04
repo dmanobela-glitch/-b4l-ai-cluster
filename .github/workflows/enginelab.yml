@@ -94,7 +94,9 @@ jobs:
           PY
 
   lab:
-    if: ${{ inputs.mode != 'smoke' }}
+    # the cron run (runners 0-3) belongs to the personal repo only: a copy of this file in another repo (the
+    # Bull4Life-Engine org since 10-04) runs dispatched waves only, or runners 0-3 would run twice
+    if: ${{ inputs.mode != 'smoke' && (github.event_name != 'schedule' || github.repository == 'dmanobela-glitch/-b4l-ai-cluster') }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
