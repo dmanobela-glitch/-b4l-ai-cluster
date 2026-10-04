@@ -1,6 +1,8 @@
 # site_storm.yml - site's BUNNY STORM wave (admin 10-01 via engine: lend donate runners to the spacebunny fleet for 24 h).
-# Started by engine's tools/bunny_storm.py (entry owner "site" in ~/B4L_Bunnies_shared/registry/storm_waves.json).
-# - Matrix of runners; runner R (0-3) hosts ONE worker site_cpu(R+1): R0-1 merge, R2-3 fix; R4 = site_cpu10 merge, R5 = site_cpu11 fix (10-04) (admin 10-02 reorg: fewer
+# Started by site_dispatch.py storm_fill (entry owner "site" in ~/B4L_Bunnies_shared/registry/storm_waves.json).
+# 10-04: site workers by role name. Runs on Bull4Life-Engine/b4l-lab and, while that org queues every new job, on
+# the personal repo too (disjoint runner lists, never the same worker twice). Secrets are site's own SITE_*.
+# - Matrix of runners; runner R (0-3) hosts ONE worker site_cpu(R+1): R0-1 merge, R2-3 fix; 16 runners, R = position in WORKERS below: site_merge01-05, site_fix01-10, site_marketing01 (role names 10-04) (admin 10-02 reorg: fewer
 #   workers, each with room for its own sub-agents; names say cpu/gpu). 10-02: 4 per runner died after 13-33 min, so a watchdog
 #   that kills the heaviest worker before memory or disk runs out, and a resource line every 5 min in the log. Lanes: kit/lanes_gh.json (box gh-storm):
 #   code and research lanes only (security, scout, audit-site, audit-cc, copy-qa, marketing), no media renders.
@@ -46,31 +48,31 @@ jobs:
           [ -x /usr/bin/chromium ] || sudo ln -sf "$(command -v google-chrome)" /usr/bin/chromium
       - name: fetch kit
         env:
-          CC_AGENT_TOKEN: ${{ secrets.CC_AGENT_TOKEN }}
+          CC_AGENT_TOKEN: ${{ secrets.SITE_CC_AGENT_TOKEN }}
         run: |
           set -eu
           umask 077
           mkdir -p "$HOME/sitefleet"
           printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/sitefleet/cc.env"
-          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: site_cpu01" \
+          curl -sf -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: site_merge01" \
             "https://bull4life.com/cc/api/artifacts/read?rel=site/current/kit/site-spacebunny-kit.txt" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/sitefleet"
           echo "kit files: $(find "$HOME/sitefleet" -type f | wc -l)"
       - name: run the storm worker
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OR_KEY_1: ${{ secrets.OR_KEY_1 }}
-          OR_KEY_2: ${{ secrets.OR_KEY_2 }}
-          OR_KEY_3: ${{ secrets.OR_KEY_3 }}
+          OR_KEY_1: ${{ secrets.SITE_OR_KEY_1 }}
+          OR_KEY_2: ${{ secrets.SITE_OR_KEY_2 }}
+          OR_KEY_3: ${{ secrets.SITE_OR_KEY_3 }}
           RUNNER_NO: ${{ matrix.runner }}
           BUNNY_MODEL: ${{ inputs.model }}
           UNTIL: ${{ inputs.until }}
         run: |
           set +e
           # admin 10-02: spread the storm over the 3 named OpenRouter accounts, one per runner in turn
-          # (OR_KEY_1 Dmanobleagb, OR_KEY_2 bull4lifeb4l, OR_KEY_3 dmanobela); the old single secret is the fallback.
+          # (OR_KEY_1 Dmanobleagb, OR_KEY_2 bull4lifeb4l, OR_KEY_3 dmanobela). No fallback: engine's key is not ours.
           case $(( RUNNER_NO % 3 )) in 0) K=$OR_KEY_1;; 1) K=$OR_KEY_2;; *) K=$OR_KEY_3;; esac
-          [ -n "$K" ] && export OPENROUTER_API_KEY=$K
+          [ -n "$K" ] || { echo "::error::no SITE_OR_KEY for runner $RUNNER_NO"; exit 1; }
+          export OPENROUTER_API_KEY=$K
           unset OR_KEY_1 OR_KEY_2 OR_KEY_3 K
           sudo useradd -m -s /bin/bash lab
           sudo cp -a "$HOME/sitefleet" /home/lab/
@@ -84,12 +86,10 @@ jobs:
                 setsid -w nice -n 15 bash /home/lab/sitefleet/run_gh.sh "$1" ) > /dev/null 2>&1 < /dev/null &
             echo $! > "$P/$1"; }
           trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
-          # R0-3 = site_cpu01-04; R4-5 = site_cpu10-11 (engine 10-04: two free job slots on this repo; cpu05-09 live elsewhere)
-          case "$RUNNER_NO" in
-            0|1|2|3) W=$(printf "site_cpu%02d" $(( RUNNER_NO + 1 )));;
-            4|5) W=$(printf "site_cpu%02d" $(( RUNNER_NO + 6 )));;
-            *) echo "runner $RUNNER_NO has no worker (R0-3 = site_cpu01-04, R4-5 = site_cpu10-11)"; exit 0;;
-          esac
+          # runner R hosts the R-th worker of this list (role names, admin 10-04); kit/lanes_gh.json has the same 16
+          WORKERS="site_merge01 site_merge02 site_fix01 site_fix02 site_merge03 site_fix04 site_fix05 site_fix06 site_fix07 site_fix08 site_fix09 site_fix10 site_merge04 site_merge05 site_fix03 site_marketing01"
+          W=$(echo $WORKERS | cut -d" " -f$(( RUNNER_NO + 1 )))
+          [ -n "$W" ] || { echo "runner $RUNNER_NO has no worker (R0-15)"; exit 0; }
           for n in $W; do start $n; sleep 20; done
           echo "$W started on runner $RUNNER_NO"
           restarts=0; kills=0; tick=0
