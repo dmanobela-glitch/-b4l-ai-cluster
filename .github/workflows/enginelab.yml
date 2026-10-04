@@ -96,7 +96,10 @@ jobs:
   lab:
     # the cron run (runners 0-3) belongs to the personal repo only: a copy of this file in another repo (the
     # Bull4Life-Engine org since 10-04) runs dispatched waves only, or runners 0-3 would run twice
-    if: ${{ inputs.mode != 'smoke' && (github.event_name != 'schedule' || github.repository == 'dmanobela-glitch/-b4l-ai-cluster') }}
+    # __B4L_LAB_HOME__ (engine 10-04, admin: "move all our runners to the enterprise"): repo variable B4L_LAB_HOME names
+    # the ONE repo the lab runs in. A repo whose B4L_LAB_HOME names another repo runs no lab job (cron, waves and
+    # respawns there end at once); unset = run as before.
+    if: ${{ inputs.mode != 'smoke' && (vars.B4L_LAB_HOME == '' || vars.B4L_LAB_HOME == github.repository) && (github.event_name != 'schedule' || github.repository == 'dmanobela-glitch/-b4l-ai-cluster') }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -250,7 +253,7 @@ jobs:
   # until its `until` deadline, like the donate grid's respawn. A cancelled run does not respawn: cancel = stop.
   respawn:
     needs: [lab]
-    if: ${{ always() && !cancelled() && inputs.until != '' && inputs.mode != 'smoke' }}
+    if: ${{ always() && !cancelled() && inputs.until != '' && inputs.mode != 'smoke' && (vars.B4L_LAB_HOME == '' || vars.B4L_LAB_HOME == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
