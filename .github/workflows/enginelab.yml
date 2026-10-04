@@ -170,7 +170,11 @@ jobs:
           RUNNER_NO: ${{ matrix.runner }}
           BUNNY_MODEL: ${{ inputs.model }}
           UNTIL: ${{ inputs.until }}
+          # admin 10-04 role names: repo variable B4L_NEW_NAMES=1 -> engine_labNN (NN = 6R+i+1, tools/fleet_names.py);
+          # unset -> the old engine_spacebunny(21+8R+i)
+          NEW_NAMES: ${{ vars.B4L_NEW_NAMES }}
         run: |
+          wname() { if [ "$NEW_NAMES" = 1 ]; then printf 'engine_lab%02d' $(( 6*RUNNER_NO + $1 + 1 )); else echo "engine_spacebunny$(( 21 + 8*RUNNER_NO + $1 ))"; fi; }
           # SANDBOX (lab run 36889040368: runner 0 got a shutdown signal 9 min after its workers started). The workers
           # run as the unprivileged user `lab` with no sudo, so no worker command can stop the runner or its processes.
           sudo useradd -m -s /bin/bash lab
@@ -197,7 +201,7 @@ jobs:
           # lab procs). Slots 6 and 7 (engine_spacebunny 21+8R+6, +7) stay unused; bcc.mjs `next` also takes no new
           # task while used RAM is at or above 15/16 of the box.
           for i in 0 1 2 3 4 5; do
-            n=$(( 21 + 8*RUNNER_NO + i ))
+            n=$(wname $i)
             # A/B (engine 10-01): ONE worker per runner runs ultracode (multi-agent workflows), the other 7 without.
             # It was every odd worker (4 per runner) until the memory deaths above.
             if [ "$i" -eq 0 ]; then export ULTRA=1; else export ULTRA=; fi
@@ -207,7 +211,7 @@ jobs:
             ( echo 1000 > /proc/self/oom_score_adj
               exec sudo --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL systemd-run --scope -q \
                 --slice=b4llab.slice -- sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL \
-                env "PATH=$PATH" setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
+                env "PATH=$PATH" setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "$n" ) > /dev/null 2>&1 &
             sleep 20
           done
           # the cap must not cost the window: if systemd-run put nothing in the slice, start the workers uncapped.
@@ -219,11 +223,11 @@ jobs:
           if [ "$SLICE_PROCS" -eq 0 ]; then
             echo "::warning::b4llab.slice is empty, workers start WITHOUT the memory cap"
             for i in 0 1 2 3 4 5; do
-              n=$(( 21 + 8*RUNNER_NO + i ))
+              n=$(wname $i)
               if [ "$i" -eq 0 ]; then export ULTRA=1; else export ULTRA=; fi
               ( echo 1000 > /proc/self/oom_score_adj
                 exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL env "PATH=$PATH" \
-                  setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "engine_spacebunny$n" ) > /dev/null 2>&1 &
+                  setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "$n" ) > /dev/null 2>&1 &
               sleep 20
             done
           else
@@ -237,7 +241,7 @@ jobs:
         run: |
           # /home/lab is 0750 (lab only), so the glob runs under sudo
           sudo dmesg 2>/dev/null | grep -iE 'out of memory|killed process|oom' | tail -5 || true
-          for d in $(sudo sh -c 'ls -d /home/lab/bunnies/engine_spacebunny*/ 2>/dev/null'); do
+          for d in $(sudo sh -c 'ls -d /home/lab/bunnies/engine_*/ 2>/dev/null'); do
             sudo test -f "$d/logs/runner.log" || continue
             echo "$(basename "$d"): starts=$(sudo grep -c ' start ' "$d/logs/runner.log") ends=$(sudo grep -c ' end ' "$d/logs/runner.log")"
           done
