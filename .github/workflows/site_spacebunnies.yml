@@ -19,6 +19,7 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
+  actions: write   # the respawn job dispatches the next window
 jobs:
   bunnies:
     runs-on: ubuntu-latest
@@ -92,3 +93,18 @@ jobs:
             [ -f "$d/logs/runner.log" ] || continue
             echo "$(basename "$d"): starts=$(grep -c ' start ' "$d/logs/runner.log") ends=$(grep -c ' end ' "$d/logs/runner.log") progress=$(grep -c ' progress ' "$d/logs/runner.log")"
           done
+
+  # __B4L_RB_RESPAWN__ (site 10-04): the cron is a fallback only. GitHub started the 00:50 window at 06:26Z, so the
+  # previous window's end at 03:33Z left site_cpu05/06 unhosted for 3 h (fleet vitals Alive RED). Each window now
+  # dispatches the next as it ends; the concurrency group keeps one running. A cancelled run (stop) does not respawn.
+  respawn:
+    needs: [bunnies]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: next window
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run site_spacebunnies.yml -R "$GITHUB_REPOSITORY" && echo "next window dispatched" || echo "::warning::respawn dispatch failed"
