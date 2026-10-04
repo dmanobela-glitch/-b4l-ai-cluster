@@ -29,7 +29,7 @@ env:
   # llama.cpp CPU release tarball (contains llama-server). Bump with the fleet's other pins.
   LLAMACPP_URL: "https://github.com/ggml-org/llama.cpp/releases/download/b10701/llama-b10701-bin-ubuntu-x64.tar.gz"
   # research_agent.py lives on the PUBLIC build repo (runners can't checkout the private engine repo).
-  AGENT_SCRIPT_URL: "https://raw.githubusercontent.com/Bull4Life/bull4life-build/main/research_agent.py"
+  AGENT_SCRIPT_URL: "https://raw.githubusercontent.com/dmanobela-glitch/bull4life-build/main/research_agent.py"
 
 jobs:
   agent:
@@ -95,9 +95,9 @@ jobs:
           LANE:            "${{ matrix.lane }}"
           MODEL_URL:       "http://127.0.0.1:8080"
           # The forward improvement tree (public build repo, same place as the agent script).
-          TREE_URL:        "https://raw.githubusercontent.com/Bull4Life/bull4life-build/main/improvement_tree.json"
+          TREE_URL:        "https://raw.githubusercontent.com/dmanobela-glitch/bull4life-build/main/improvement_tree.json"
           # engine's scorecard: each agent reads its own hit-rate + steers by [ENGINE-FEEDBACK] on the board.
-          SCORE_URL:       "https://raw.githubusercontent.com/Bull4Life/bull4life-build/main/scorecard.json"
+          SCORE_URL:       "https://raw.githubusercontent.com/dmanobela-glitch/bull4life-build/main/scorecard.json"
           # Dedicated research board -- keeps the swarm's volume OFF the shared group channel (no more spam there).
           BOARD:           "research"
           WINDOW_SEC:      "${{ fromJSON(inputs.window_min || '330') }}"
