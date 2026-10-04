@@ -1,6 +1,6 @@
 # site_storm.yml - site's BUNNY STORM wave (admin 10-01 via engine: lend donate runners to the spacebunny fleet for 24 h).
 # Started by engine's tools/bunny_storm.py (entry owner "site" in ~/B4L_Bunnies_shared/registry/storm_waves.json).
-# - Matrix of runners; runner R (0-3) hosts ONE worker site_cpu(R+1): R0-1 merge, R2-3 fix (admin 10-02 reorg: fewer
+# - Matrix of runners; runner R (0-3) hosts ONE worker site_cpu(R+1): R0-1 merge, R2-3 fix; R4 = site_cpu10 merge, R5 = site_cpu11 fix (10-04) (admin 10-02 reorg: fewer
 #   workers, each with room for its own sub-agents; names say cpu/gpu). 10-02: 4 per runner died after 13-33 min, so a watchdog
 #   that kills the heaviest worker before memory or disk runs out, and a resource line every 5 min in the log. Lanes: kit/lanes_gh.json (box gh-storm):
 #   code and research lanes only (security, scout, audit-site, audit-cc, copy-qa, marketing), no media renders.
@@ -84,8 +84,12 @@ jobs:
                 setsid -w nice -n 15 bash /home/lab/sitefleet/run_gh.sh "$1" ) > /dev/null 2>&1 < /dev/null &
             echo $! > "$P/$1"; }
           trap 'echo "step got TERM at $(date -u +%T), kept running"' TERM
-          [ "$RUNNER_NO" -le 3 ] || { echo "runner $RUNNER_NO has no worker (site_cpu01-04 = R0-3)"; exit 0; }
-          W=$(printf "site_cpu%02d" $(( RUNNER_NO + 1 )))
+          # R0-3 = site_cpu01-04; R4-5 = site_cpu10-11 (engine 10-04: two free job slots on this repo; cpu05-09 live elsewhere)
+          case "$RUNNER_NO" in
+            0|1|2|3) W=$(printf "site_cpu%02d" $(( RUNNER_NO + 1 )));;
+            4|5) W=$(printf "site_cpu%02d" $(( RUNNER_NO + 6 )));;
+            *) echo "runner $RUNNER_NO has no worker (R0-3 = site_cpu01-04, R4-5 = site_cpu10-11)"; exit 0;;
+          esac
           for n in $W; do start $n; sleep 20; done
           echo "$W started on runner $RUNNER_NO"
           restarts=0; kills=0; tick=0
