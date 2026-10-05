@@ -141,10 +141,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: deps + claude cli
+      - name: deps + claude cli + opencode cli
         run: |
           pip install --quiet numpy pandas matplotlib scipy ccxt
           npm i -g @anthropic-ai/claude-code > /dev/null 2>&1 && claude --version
+          # admin 10-05: the free stealth models live on OpenCode Zen (its free tier works only inside OpenCode)
+          npm i -g opencode-ai > /dev/null 2>&1 && echo "opencode $(opencode --version 2>&1 | head -1)"
       - name: decrypt engine (a git baseline for the workers' diffs)
         env:
           KIT_KEY: ${{ secrets.B4L_KIT_KEY }}
@@ -176,6 +178,8 @@ jobs:
           BUNNY_MODEL: ${{ inputs.model || vars.B4L_MODEL }}
           BUNNY_BASE_URL: ${{ vars.B4L_MODEL_BASE }}
           BUNNY_API_KEY: ${{ secrets.B4L_MODEL_KEY }}
+          BUNNY_HARNESS: ${{ vars.B4L_HARNESS }}
+          BUNNY_VARIANT: ${{ vars.B4L_VARIANT }}
           UNTIL: ${{ inputs.until }}
           # admin 10-04 role names: repo variable B4L_NEW_NAMES=1 -> engine_labNN (NN = 6R+i+1, tools/fleet_names.py);
           # unset -> the old engine_spacebunny(21+8R+i)
@@ -217,8 +221,8 @@ jobs:
             # systemd-run --scope runs the command itself (env inherited) in a new scope under b4llab.slice; every child
             # (claude, sub-agents, backtests) stays in that cgroup
             ( echo 1000 > /proc/self/oom_score_adj
-              exec sudo --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL,BUNNY_BASE_URL,BUNNY_API_KEY systemd-run --scope -q \
-                --slice=b4llab.slice -- sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL,BUNNY_BASE_URL,BUNNY_API_KEY \
+              exec sudo --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL,BUNNY_BASE_URL,BUNNY_API_KEY,BUNNY_HARNESS,BUNNY_VARIANT systemd-run --scope -q \
+                --slice=b4llab.slice -- sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL,BUNNY_BASE_URL,BUNNY_API_KEY,BUNNY_HARNESS,BUNNY_VARIANT \
                 env "PATH=$PATH" setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "$n" ) > /dev/null 2>&1 &
             sleep 20
           done
@@ -234,7 +238,7 @@ jobs:
               n=$(wname $i)
               if [ "$i" -eq 0 ]; then export ULTRA=1; else export ULTRA=; fi
               ( echo 1000 > /proc/self/oom_score_adj
-                exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL,BUNNY_BASE_URL,BUNNY_API_KEY env "PATH=$PATH" \
+                exec sudo -u lab -H --preserve-env=OPENROUTER_API_KEY,JOB_END,ROLE,ULTRA,BUNNY_MODEL,BUNNY_BASE_URL,BUNNY_API_KEY,BUNNY_HARNESS,BUNNY_VARIANT env "PATH=$PATH" \
                   setsid -w nice -n 15 bash /home/lab/bunnies/run_gh.sh "$n" ) > /dev/null 2>&1 &
               sleep 20
             done
