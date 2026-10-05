@@ -169,7 +169,7 @@ jobs:
             "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/kit/bunny-kit.md" \
             | jq -r .body | base64 -d | tar xz -C "$HOME/bunnies"
           echo "kit files: $(find "$HOME/bunnies" -type f | wc -l)"
-      - name: run 6 lab workers
+      - name: run 4 lab workers
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           RUNNER_NO: ${{ matrix.runner }}
@@ -212,7 +212,7 @@ jobs:
           # 6 workers per box, not 8 (admin 10-02; run 36937576079: runners 0 and 2 died of memory at 15.8/16 GB, ~90
           # lab procs). Slots 6 and 7 (engine_spacebunny 21+8R+6, +7) stay unused; bcc.mjs `next` also takes no new
           # task while used RAM is at or above 15/16 of the box.
-          for i in 0 1 2 3 4 5; do
+          for i in 0 1 2 3; do
             n=$(wname $i)
             # A/B (engine 10-01): ONE worker per runner runs ultracode (multi-agent workflows), the other 7 without.
             # It was every odd worker (4 per runner) until the memory deaths above.
@@ -234,7 +234,7 @@ jobs:
           SLICE_PROCS=$( (cat /sys/fs/cgroup/b4llab.slice/cgroup.procs /sys/fs/cgroup/b4llab.slice/*/cgroup.procs 2>/dev/null || true) | wc -l)
           if [ "$SLICE_PROCS" -eq 0 ]; then
             echo "::warning::b4llab.slice is empty, workers start WITHOUT the memory cap"
-            for i in 0 1 2 3 4 5; do
+            for i in 0 1 2 3; do
               n=$(wname $i)
               if [ "$i" -eq 0 ]; then export ULTRA=1; else export ULTRA=; fi
               ( echo 1000 > /proc/self/oom_score_adj
@@ -245,7 +245,7 @@ jobs:
           else
             echo "slice cap: $(cat /sys/fs/cgroup/b4llab.slice/memory.max) bytes, $SLICE_PROCS procs in it"
           fi
-          echo "6 lab workers started on runner $RUNNER_NO"
+          echo "4 lab workers started on runner $RUNNER_NO"
           # wait for the WORKERS only: a bare `wait` also waited for the MEM logger (never exits), so every job ran to
           # the 350-min cap, ended "cancelled" and skipped its summary
           while pgrep -u lab -f run_gh.sh > /dev/null && [ "$(date +%s)" -lt $(( JOB_END + 180 )) ]; do sleep 30; done
