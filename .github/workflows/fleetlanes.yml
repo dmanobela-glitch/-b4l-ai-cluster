@@ -17,6 +17,10 @@ on:
         description: 'epoch s: respawn after every window until then (empty = one window)'
         required: false
         default: ''
+      dry:
+        description: '1 = every setup step, then list the slots and stop: no agent starts, no model call'
+        required: false
+        default: ''
 concurrency:
   group: fleetlanes-r${{ inputs.runner }}
   cancel-in-progress: false
@@ -37,6 +41,7 @@ jobs:
         run: |
           b=$(curl -s -m 30 -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: engine" \
               "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/reference/lanes-stop.md" | jq -r '.body // ""' 2>/dev/null)
+          if [ "${{ inputs.dry }}" = 1 ]; then echo "dry run: setup only, the stop switch is not read"; exit 0; fi
           if printf '%s' "$b" | head -1 | grep -q '^STOP'; then echo "lanes-stop says STOP: no window"; echo "stop=1" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/checkout@v4
         if: steps.stop.outputs.stop != '1'
@@ -83,7 +88,7 @@ jobs:
           echo "kit files: $(ls "$HOME/lanes" | wc -l), slots on runner ${{ inputs.runner }}: $(wc -l < "$HOME/lanes/slots.txt")"
           cut -d' ' -f1,2 "$HOME/lanes/slots.txt"
       - name: run the lane (fixed slots, handoff at 5h30)
-        if: steps.stop.outputs.stop != '1'
+        if: steps.stop.outputs.stop != '1' && inputs.dry != '1'
         env:
           OC_KEY: ${{ secrets.B4L_MODEL_KEY }}
         run: |
@@ -104,7 +109,7 @@ jobs:
           done
   respawn:
     needs: [lane]
-    if: ${{ always() && !cancelled() && inputs.until != '' && needs.lane.outputs.stop != '1' }}
+    if: ${{ always() && !cancelled() && inputs.until != '' && inputs.dry != '1' && needs.lane.outputs.stop != '1' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
