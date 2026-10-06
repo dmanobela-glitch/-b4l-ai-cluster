@@ -260,6 +260,12 @@ jobs:
             sudo test -f "$d/logs/runner.log" || continue
             echo "$(basename "$d"): starts=$(sudo grep -c ' start ' "$d/logs/runner.log") ends=$(sudo grep -c ' end ' "$d/logs/runner.log")"
           done
+          # DIAG runner 33 only (engine 10-06): its one worker runs a harmless test row; print ONLY error-class lines,
+          # cut to 160 chars, so a failing harness shows WHY without echoing any content
+          if [ "${{ matrix.runner }}" = 33 ]; then
+            sudo sh -c 'cat /home/lab/bunnies/engine_lab199/logs/*.log 2>/dev/null' | grep -aiE 'error|denied|rejected|not found|ENOENT|EACCES|invalid|unauthor|forbidden|failed|exit' | sed -E 's/(sk|oc_sk|atr|vck)[-_][A-Za-z0-9_-]+/<key>/g' | cut -c1-160 | sort | uniq -c | sort -rn | head -25
+            sudo sh -c 'tail -5 /home/lab/bunnies/engine_lab199/logs/runner.log' | cut -c1-160
+          fi
 
   # __B4L_STORM_RESPAWN__ (engine 10-01): an extra wave (tools/bunny_storm.py) re-dispatches itself after each window
   # until its `until` deadline, like the donate grid's respawn. A cancelled run does not respawn: cancel = stop.
