@@ -1,0 +1,118 @@
+# fleetlanes.yml - FLEET LANES runners (engine, admin 2026-10-06, rebuilt from zero). One GitHub runner per lane:
+#   runner 0 = master orchestrator, 1 = indicator visuals, 2 = strategy LAB, 3 = research + apps.
+# Every slot keeps its FIXED name and model (registry engine/current/reference/fleet-lanes.json, source
+# compute/fleet_kit/lanes/LANES.json): the same runner number always wakes the same agents. At 5 h 30 m each agent writes
+# a forward handoff to the CC; the next window's same agent reads it first. Mirror of the live file in the PUBLIC repo
+# dmanobela-glitch/-b4l-ai-cluster: nothing private is printed, keys are repo secrets, the kit comes from the CC hub.
+# STOP: write "STOP" as the first line of engine/current/reference/lanes-stop.md -> no new window starts, no respawn.
+name: fleetlanes
+run-name: ${{ format('fleetlanes runner {0}{1}', inputs.runner, inputs.until && ' (respawning)' || '') }}
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'lane runner: 0 master, 1 visual, 2 lab, 3 research'
+        required: true
+      until:
+        description: 'epoch s: respawn after every window until then (empty = one window)'
+        required: false
+        default: ''
+concurrency:
+  group: fleetlanes-r${{ inputs.runner }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: write
+jobs:
+  lane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    outputs:
+      stop: ${{ steps.stop.outputs.stop }}
+    steps:
+      - name: stop switch
+        id: stop
+        env:
+          CC_AGENT_TOKEN: ${{ secrets.CC_AGENT_TOKEN }}
+        run: |
+          b=$(curl -s -m 30 -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: engine" \
+              "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/reference/lanes-stop.md" | jq -r '.body // ""' 2>/dev/null)
+          if printf '%s' "$b" | head -1 | grep -q '^STOP'; then echo "lanes-stop says STOP: no window"; echo "stop=1" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.stop.outputs.stop != '1'
+        with:
+          repository: dmanobela-glitch/-b4l-ai-cluster
+          ref: labkit
+          path: payload
+      - uses: actions/setup-python@v5
+        if: steps.stop.outputs.stop != '1'
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        if: steps.stop.outputs.stop != '1'
+        with:
+          node-version: '20'
+      - name: deps + opencode cli
+        if: steps.stop.outputs.stop != '1'
+        run: |
+          pip install --quiet numpy pandas matplotlib scipy ccxt playwright > /dev/null 2>&1 || true
+          npm i -g opencode-ai > /dev/null 2>&1 && echo "opencode $(opencode --version 2>&1 | head -1)"
+      - name: decrypt engine (read-only reference for the agents)
+        if: steps.stop.outputs.stop != '1'
+        env:
+          KIT_KEY: ${{ secrets.B4L_KIT_KEY }}
+        run: |
+          set -eu
+          mkdir -p "$HOME/engine"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in payload/labkit.enc -pass "pass:$KIT_KEY" | tar -xz -C "$HOME/engine"
+          rm -rf payload
+          echo "engine files: $(find "$HOME/engine" -type f | wc -l)"
+      - name: fetch lanes kit + registry
+        if: steps.stop.outputs.stop != '1'
+        env:
+          CC_AGENT_TOKEN: ${{ secrets.CC_AGENT_TOKEN }}
+        run: |
+          set -eu
+          umask 077
+          printf 'CC_AGENT_TOKEN=%s\n' "$CC_AGENT_TOKEN" > "$HOME/cc.env"
+          mkdir -p "$HOME/lanes"
+          curl -sf -m 60 -H "Authorization: Bearer $CC_AGENT_TOKEN" -H "X-CC-Agent: engine" \
+            "https://bull4life.com/cc/api/artifacts/read?rel=engine/current/kit/lanes-kit.md" \
+            | jq -r .body | base64 -d | tar xz -C "$HOME/lanes"
+          node "$HOME/lanes/lane.mjs" slots "${{ inputs.runner }}" > "$HOME/lanes/slots.txt"
+          echo "kit files: $(ls "$HOME/lanes" | wc -l), slots on runner ${{ inputs.runner }}: $(wc -l < "$HOME/lanes/slots.txt")"
+          cut -d' ' -f1,2 "$HOME/lanes/slots.txt"
+      - name: run the lane (fixed slots, handoff at 5h30)
+        if: steps.stop.outputs.stop != '1'
+        env:
+          OC_KEY: ${{ secrets.B4L_MODEL_KEY }}
+        run: |
+          export JOB_T0=$(date +%s)
+          export HANDOFF_AT=$(( JOB_T0 + 330 * 60 )) JOB_END=$(( JOB_T0 + 345 * 60 )) K="$HOME/lanes"
+          while read -r name role models account; do
+            [ -n "$name" ] || continue
+            BUNNY="$name" ROLE="$role" MODELS="$models" ACCOUNT="$account" setsid bash "$K/lane_run.sh" > /dev/null 2>&1 &
+            echo "started $name ($role)"
+            sleep 20
+          done < "$K/slots.txt"
+          while pgrep -f lane_run.sh > /dev/null && [ "$(date +%s)" -lt "$JOB_END" ]; do sleep 60; done
+          pkill -f lane_run.sh || true
+          # counts only: what each slot did this window (public log)
+          for d in "$HOME"/slots/*/; do
+            n=$(basename "$d"); f="$d/logs/runner.log"
+            echo "$n: turns $(grep -c ' turn rc ' "$f" 2>/dev/null) refusals $(grep -c 'refused on ' "$f" 2>/dev/null) handoff $(grep -c 'handoff: ' "$f" 2>/dev/null)"
+          done
+  respawn:
+    needs: [lane]
+    if: ${{ always() && !cancelled() && inputs.until != '' && needs.lane.outputs.stop != '1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: next window (same runner number = same agents)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          if [ $(( UNTIL - $(date +%s) )) -lt 1800 ]; then echo "deadline reached, no respawn"; exit 0; fi
+          gh workflow run fleetlanes.yml -R "$GITHUB_REPOSITORY" -f runner="${{ inputs.runner }}" -f until="$UNTIL" \
+            && echo "runner ${{ inputs.runner }}: next window dispatched" || echo "::warning::respawn dispatch failed"
